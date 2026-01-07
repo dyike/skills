@@ -349,8 +349,12 @@ func formatNewsResult(articles []*NewsArticle) *NewsOutput {
 	var result string
 	for i, article := range articles {
 		result += fmt.Sprintf("%d. %s\n", i+1, article.Title)
-		result += fmt.Sprintf("   Source: %s | Published: %s\n",
-			article.Source, article.PublishedAt.Format("2006-01-02 15:04"))
+		if article.PublishedAt.IsZero() {
+			result += fmt.Sprintf("   Source: %s | Published: Unknown\n", article.Source)
+		} else {
+			result += fmt.Sprintf("   Source: %s | Published: %s\n",
+				article.Source, article.PublishedAt.Format("2006-01-02 15:04"))
+		}
 		if article.Content != "" && len(article.Content) > 150 {
 			result += fmt.Sprintf("   Summary: %s...\n", article.Content[:150])
 		} else if article.Content != "" {

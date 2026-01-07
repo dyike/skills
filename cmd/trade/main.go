@@ -430,9 +430,13 @@ func formatNewsOutput(articles []*trade.NewsArticle) *trade.NewsOutput {
 	result.WriteString(fmt.Sprintf("# News Articles (%d results)\n\n", len(articles)))
 
 	now := time.Now()
-	var breaking, recent, older []*trade.NewsArticle
+	var breaking, recent, older, undated []*trade.NewsArticle
 
 	for _, article := range articles {
+		if article.PublishedAt.IsZero() {
+			undated = append(undated, article)
+			continue
+		}
 		hoursSince := now.Sub(article.PublishedAt).Hours()
 		if hoursSince <= 2 {
 			breaking = append(breaking, article)
@@ -475,6 +479,19 @@ func formatNewsOutput(articles []*trade.NewsArticle) *trade.NewsOutput {
 			result.WriteString(fmt.Sprintf("### %d. %s\n", i+1, article.Title))
 			result.WriteString(fmt.Sprintf("**%s** - %s\n", article.Source, article.PublishedAt.Format("2006-01-02")))
 			result.WriteString(fmt.Sprintf("URL: %s\n", article.URL))
+			result.WriteString("\n")
+		}
+	}
+
+	if len(undated) > 0 {
+		result.WriteString("## Undated Coverage\n\n")
+		for i, article := range undated {
+			result.WriteString(fmt.Sprintf("### %d. %s\n", i+1, article.Title))
+			result.WriteString(fmt.Sprintf("**%s** - Published: Unknown\n", article.Source))
+			result.WriteString(fmt.Sprintf("URL: %s\n", article.URL))
+			if article.Content != "" {
+				result.WriteString(fmt.Sprintf("Summary: %s\n", truncate(article.Content, 150)))
+			}
 			result.WriteString("\n")
 		}
 	}

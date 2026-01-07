@@ -76,11 +76,15 @@ func (gnc *GoogleNewsClient) SearchGoogleNews(query string, language, country st
 	// Try RSS method first (more reliable)
 	articles, err := gnc.searchViaRSS(query, language, country, maxResults)
 	if err == nil && len(articles) > 0 {
-		return articles, nil
+		return filterArticlesByDays(articles, daysBack), nil
 	}
 
 	// Fallback to HTML scraping
-	return gnc.searchViaHTML(query, language, country, maxResults)
+	htmlArticles, err := gnc.searchViaHTML(query, language, country, maxResults)
+	if err != nil {
+		return nil, err
+	}
+	return filterArticlesByDays(htmlArticles, daysBack), nil
 }
 
 func (gnc *GoogleNewsClient) searchViaRSS(query, language, country string, maxResults int) ([]*NewsArticle, error) {
@@ -158,9 +162,6 @@ func (gnc *GoogleNewsClient) convertRSSItemToArticle(item Item, query string) *N
 	pubTime, err := time.Parse(time.RFC1123Z, item.PubDate)
 	if err != nil {
 		pubTime, _ = time.Parse("Mon, 02 Jan 2006 15:04:05 MST", item.PubDate)
-	}
-	if pubTime.IsZero() {
-		pubTime = time.Now()
 	}
 
 	source := item.Source.Text
@@ -336,6 +337,9 @@ func (gnc *GoogleNewsClient) parseSourceTime(text string) (source, timeText stri
 func (gnc *GoogleNewsClient) parseTimeText(timeText string) time.Time {
 	now := time.Now()
 	timeText = strings.ToLower(strings.TrimSpace(timeText))
+	if timeText == "" {
+		return time.Time{}
+	}
 
 	patterns := map[*regexp.Regexp]func([]string) time.Duration{
 		regexp.MustCompile(`(\d+)\s*minutes?\s*ago`): func(matches []string) time.Duration {
@@ -372,7 +376,7 @@ func (gnc *GoogleNewsClient) parseTimeText(timeText string) time.Time {
 		}
 	}
 
-	return now.Add(-1 * time.Hour)
+	return time.Time{}
 }
 
 func (gnc *GoogleNewsClient) removeDuplicates(articles []*NewsArticle) []*NewsArticle {
@@ -408,6 +412,23 @@ func (gnc *GoogleNewsClient) containsStockSymbol(article *NewsArticle, symbol st
 
 	regex := regexp.MustCompile(fmt.Sprintf(`\b%s\b`, regexp.QuoteMeta(symbol)))
 	return regex.MatchString(text)
+}
+
+func filterArticlesByDays(articles []*NewsArticle, daysBack int) []*NewsArticle {
+	if daysBack <= 0 {
+		return articles
+	}
+
+	cutoff := time.Now().AddDate(0, 0, -daysBack)
+	filtered := make([]*NewsArticle, 0, len(articles))
+
+	for _, article := range articles {
+		if article.PublishedAt.IsZero() || !article.PublishedAt.Before(cutoff) {
+			filtered = append(filtered, article)
+		}
+	}
+
+	return filtered
 }
 
 func (gnc *GoogleNewsClient) cleanHTMLContent(htmlContent string) string {

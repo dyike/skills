@@ -62,6 +62,50 @@ risk_history: [accumulated from Risk analysts]
 final_decision: [from RiskManager]
 ```
 
+## Tools
+
+Agents can call tools via `trade execute --tool <name> --params '<json>'`. Use `trade tools` to get all tool definitions.
+
+### Market Data Tools (requires LONGPORT_* env vars)
+
+| Tool | Parameters | Description |
+|------|------------|-------------|
+| `get_market_data` | `symbol`, `count` | OHLCV candlestick data |
+| `get_stock_indicators` | `symbol`, `date`, `days` | Technical indicators (EMA, SMA, RSI, MACD, Bollinger, ATR) |
+
+**Example - MarketAnalyst:**
+```bash
+trade execute --tool get_stock_indicators --params '{"symbol":"AAPL.US","date":"2025-01-04","days":30}'
+```
+
+### Reddit Tools
+
+| Tool | Parameters | Description |
+|------|------------|-------------|
+| `get_reddit_posts` | `subreddit`, `sort`, `limit` | Posts from subreddit |
+| `search_reddit` | `query`, `subreddit`, `sort`, `time`, `limit` | Search Reddit posts |
+| `get_stock_mentions` | `symbol` | Find stock mentions across finance subreddits |
+| `get_finance_posts` | `limit` | Popular posts from finance subreddits |
+
+**Example - SocialAnalyst:**
+```bash
+trade execute --tool get_stock_mentions --params '{"symbol":"AAPL"}'
+trade execute --tool get_reddit_posts --params '{"subreddit":"wallstreetbets","sort":"hot","limit":20}'
+```
+
+### News Tools
+
+| Tool | Parameters | Description |
+|------|------------|-------------|
+| `search_news` | `query`, `language`, `country`, `limit`, `days` | Search Google News |
+| `get_stock_news` | `symbol`, `limit` | Stock-specific news |
+| `get_finance_news` | `limit` | General finance news |
+
+**Example - NewsAnalyst:**
+```bash
+trade execute --tool get_stock_news --params '{"symbol":"AAPL","limit":15}'
+```
+
 ## Agent Prompts
 
 All prompts in `references/`:

@@ -55,13 +55,66 @@ func (mc *MarketClient) GetMarketData(ctx context.Context, symbol string, count 
 	if count <= 0 {
 		count = 30
 	}
+	if count > 1000 {
+		count = 1000
+	}
 
 	sticks, err := mc.quoteCtx.Candlesticks(ctx, symbol, quote.PeriodDay, int32(count), quote.AdjustTypeNo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get candlesticks: %w", err)
 	}
 
-	var marketData []*MarketData
+	return convertCandlesticks(symbol, sticks), nil
+}
+
+// GetStockIndicators calculates technical indicators for a stock
+func (mc *MarketClient) GetStockIndicators(ctx context.Context, symbol, currDate string, lookBackDays int) (*StockIndicators, error) {
+	if mc.quoteCtx == nil {
+		return nil, errors.New("quote context is nil")
+	}
+
+	// Parse current date
+	endDate, err := time.Parse("2006-01-02", currDate)
+	if err != nil {
+		return nil, fmt.Errorf("invalid date format: %s", currDate)
+	}
+
+	if lookBackDays <= 0 {
+		lookBackDays = 30
+	}
+	startDate := endDate.AddDate(0, 0, -lookBackDays)
+
+	// Get market data with buffer for indicator calculation
+	bufferDays := 250
+	bufferStartDate := startDate.AddDate(0, 0, -bufferDays)
+
+	sticks, err := mc.quoteCtx.HistoryCandlesticksByDate(ctx, symbol, quote.PeriodDay, quote.AdjustTypeNo, &bufferStartDate, &endDate)
+	if err != nil {
+		return nil, err
+	}
+
+	marketData := convertCandlesticks(symbol, sticks)
+	if len(marketData) == 0 {
+		return nil, fmt.Errorf("no market data available for symbol %s", symbol)
+	}
+
+	// Calculate all indicators
+	allIndicators := calculateAllIndicators(marketData, startDate, endDate)
+
+	// Generate summary
+	summary := generateTechnicalSummary(allIndicators)
+
+	return &StockIndicators{
+		Symbol:     symbol,
+		StartDate:  startDate.Format("2006-01-02"),
+		EndDate:    currDate,
+		Indicators: allIndicators,
+		Summary:    summary,
+	}, nil
+}
+
+func convertCandlesticks(symbol string, sticks []*quote.Candlestick) []*MarketData {
+	marketData := make([]*MarketData, 0, len(sticks))
 	for _, stick := range sticks {
 		date := time.Unix(stick.Timestamp, 0).Format("2006-01-02")
 		open, _ := stick.Open.Float64()
@@ -80,43 +133,7 @@ func (mc *MarketClient) GetMarketData(ctx context.Context, symbol string, count 
 		})
 	}
 
-	return marketData, nil
-}
-
-// GetStockIndicators calculates technical indicators for a stock
-func (mc *MarketClient) GetStockIndicators(ctx context.Context, symbol, currDate string, lookBackDays int) (*StockIndicators, error) {
-	// Parse current date
-	endDate, err := time.Parse("2006-01-02", currDate)
-	if err != nil {
-		return nil, fmt.Errorf("invalid date format: %s", currDate)
-	}
-
-	startDate := endDate.AddDate(0, 0, -lookBackDays)
-
-	// Get market data with buffer for indicator calculation
-	bufferDays := 250
-	marketData, err := mc.GetMarketData(ctx, symbol, lookBackDays+bufferDays)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(marketData) == 0 {
-		return nil, fmt.Errorf("no market data available for symbol %s", symbol)
-	}
-
-	// Calculate all indicators
-	allIndicators := calculateAllIndicators(marketData, startDate, endDate)
-
-	// Generate summary
-	summary := generateTechnicalSummary(allIndicators)
-
-	return &StockIndicators{
-		Symbol:     symbol,
-		StartDate:  startDate.Format("2006-01-02"),
-		EndDate:    currDate,
-		Indicators: allIndicators,
-		Summary:    summary,
-	}, nil
+	return marketData
 }
 
 // calculateAllIndicators calculates all technical indicators
