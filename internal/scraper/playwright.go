@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -14,19 +16,45 @@ import (
 
 // PlaywrightScraper wraps Playwright browser for scraping
 type PlaywrightScraper struct {
-	pw      *playwright.Playwright
-	browser playwright.Browser
+	pw              *playwright.Playwright
+	browser         playwright.Browser
+	twitterUsername string
+	twitterPassword string
+	cookieFile      string
 }
 
 // NewPlaywrightScraper creates a new Playwright scraper
 func NewPlaywrightScraper() (*PlaywrightScraper, error) {
+	return NewPlaywrightScraperWithAuth("", "")
+}
+
+// NewPlaywrightScraperWithAuth creates a new Playwright scraper with Twitter authentication
+func NewPlaywrightScraperWithAuth(twitterUsername, twitterPassword string) (*PlaywrightScraper, error) {
 	pw, err := playwright.Run()
 	if err != nil {
 		return nil, fmt.Errorf("could not start playwright: %w", err)
 	}
 
+	// Get cookie file path
+	homeDir, _ := os.UserHomeDir()
+	cookieFile := filepath.Join(homeDir, ".news-scraper", "twitter-cookies.json")
+
+	// Check if we have saved cookies - if not, launch browser in visible mode for login
+	headless := true
+	if _, err := os.Stat(cookieFile); os.IsNotExist(err) {
+		headless = false
+		fmt.Fprintln(os.Stderr, "No saved session found - will open visible browser for login")
+	}
+
 	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
-		Headless: playwright.Bool(true),
+		Headless: playwright.Bool(headless),
+		Args: []string{
+			"--disable-blink-features=AutomationControlled",
+			"--disable-dev-shm-usage",
+			"--no-sandbox",
+			"--disable-setuid-sandbox",
+			"--disable-web-security",
+		},
 	})
 	if err != nil {
 		pw.Stop()
@@ -34,8 +62,11 @@ func NewPlaywrightScraper() (*PlaywrightScraper, error) {
 	}
 
 	return &PlaywrightScraper{
-		pw:      pw,
-		browser: browser,
+		pw:              pw,
+		browser:         browser,
+		twitterUsername: twitterUsername,
+		twitterPassword: twitterPassword,
+		cookieFile:      cookieFile,
 	}, nil
 }
 
@@ -52,6 +83,13 @@ func (s *PlaywrightScraper) Close() {
 func (s *PlaywrightScraper) newPage() (playwright.Page, error) {
 	context, err := s.browser.NewContext(playwright.BrowserNewContextOptions{
 		UserAgent: playwright.String(defaultHeaders["User-Agent"]),
+		Viewport: &playwright.Size{
+			Width:  1920,
+			Height: 1080,
+		},
+		Locale:         playwright.String("en-US"),
+		TimezoneId:     playwright.String("America/New_York"),
+		JavaScriptEnabled: playwright.Bool(true),
 	})
 	if err != nil {
 		return nil, err
@@ -62,7 +100,201 @@ func (s *PlaywrightScraper) newPage() (playwright.Page, error) {
 		return nil, err
 	}
 
+	// Add script to override navigator properties to avoid detection
+	err = page.AddInitScript(playwright.Script{
+		Content: playwright.String(`
+			Object.defineProperty(navigator, 'webdriver', {
+				get: () => undefined
+			});
+			Object.defineProperty(navigator, 'platform', {
+				get: () => 'MacIntel'
+			});
+			Object.defineProperty(navigator, 'plugins', {
+				get: () => [1, 2, 3, 4, 5]
+			});
+			Object.defineProperty(navigator, 'languages', {
+				get: () => ['en-US', 'en']
+			});
+		`),
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	return page, nil
+}
+
+// newTwitterPage creates a new page with Twitter authentication
+func (s *PlaywrightScraper) newTwitterPage() (playwright.Page, playwright.BrowserContext, error) {
+	context, err := s.browser.NewContext(playwright.BrowserNewContextOptions{
+		UserAgent: playwright.String(defaultHeaders["User-Agent"]),
+		Viewport: &playwright.Size{
+			Width:  1920,
+			Height: 1080,
+		},
+		Locale:            playwright.String("en-US"),
+		TimezoneId:        playwright.String("America/New_York"),
+		JavaScriptEnabled: playwright.Bool(true),
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Ensure Twitter authentication
+	if err := s.ensureTwitterAuth(context); err != nil {
+		context.Close()
+		return nil, nil, err
+	}
+
+	page, err := context.NewPage()
+	if err != nil {
+		context.Close()
+		return nil, nil, err
+	}
+
+	// Add script to override navigator properties to avoid detection
+	err = page.AddInitScript(playwright.Script{
+		Content: playwright.String(`
+			Object.defineProperty(navigator, 'webdriver', {
+				get: () => undefined
+			});
+			Object.defineProperty(navigator, 'platform', {
+				get: () => 'MacIntel'
+			});
+			Object.defineProperty(navigator, 'plugins', {
+				get: () => [1, 2, 3, 4, 5]
+			});
+			Object.defineProperty(navigator, 'languages', {
+				get: () => ['en-US', 'en']
+			});
+		`),
+	})
+	if err != nil {
+		page.Close()
+		context.Close()
+		return nil, nil, err
+	}
+
+	return page, context, nil
+}
+
+// saveCookies saves cookies to file
+func (s *PlaywrightScraper) saveCookies(context playwright.BrowserContext) error {
+	cookies, err := context.Cookies()
+	if err != nil {
+		return err
+	}
+
+	// Create directory if it doesn't exist
+	dir := filepath.Dir(s.cookieFile)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+
+	// Save cookies to file
+	data, err := json.MarshalIndent(cookies, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(s.cookieFile, data, 0644)
+}
+
+// loadCookies loads cookies from file into context
+func (s *PlaywrightScraper) loadCookies(context playwright.BrowserContext) error {
+	data, err := os.ReadFile(s.cookieFile)
+	if err != nil {
+		return err
+	}
+
+	var cookies []playwright.Cookie
+	if err := json.Unmarshal(data, &cookies); err != nil {
+		return err
+	}
+
+	// Convert []playwright.Cookie to []playwright.OptionalCookie
+	optionalCookies := make([]playwright.OptionalCookie, len(cookies))
+	for i, cookie := range cookies {
+		optionalCookies[i] = playwright.OptionalCookie{
+			Name:     cookie.Name,
+			Value:    cookie.Value,
+			Domain:   &cookie.Domain,
+			Path:     &cookie.Path,
+			Expires:  &cookie.Expires,
+			HttpOnly: &cookie.HttpOnly,
+			Secure:   &cookie.Secure,
+			SameSite: cookie.SameSite,
+		}
+	}
+
+	return context.AddCookies(optionalCookies)
+}
+
+// loginToTwitter performs Twitter login - opens browser for manual login
+func (s *PlaywrightScraper) loginToTwitter(page playwright.Page) error {
+	fmt.Fprintln(os.Stderr, "\n==========================================================")
+	fmt.Fprintln(os.Stderr, "Please log in to Twitter/X in the browser window")
+	fmt.Fprintln(os.Stderr, "The browser will open shortly...")
+	fmt.Fprintln(os.Stderr, "After logging in, the scraper will continue automatically")
+	fmt.Fprintln(os.Stderr, "==========================================================\n")
+
+	// Go to login page
+	_, err := page.Goto("https://x.com/i/flow/login", playwright.PageGotoOptions{
+		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
+		Timeout:   playwright.Float(30000),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to load login page: %w", err)
+	}
+
+	// Wait for user to complete login by checking for navigation bar
+	fmt.Fprintln(os.Stderr, "Waiting for you to complete login...")
+	_, err = page.WaitForSelector("nav[role='navigation']", playwright.PageWaitForSelectorOptions{
+		Timeout: playwright.Float(300000), // 5 minutes timeout
+	})
+	if err != nil {
+		return fmt.Errorf("login timeout or failed - could not find navigation: %w", err)
+	}
+
+	fmt.Fprintln(os.Stderr, "✓ Successfully logged in to Twitter/X")
+	fmt.Fprintln(os.Stderr, "✓ Session saved for future use\n")
+	return nil
+}
+
+// ensureTwitterAuth ensures we have valid Twitter authentication
+func (s *PlaywrightScraper) ensureTwitterAuth(context playwright.BrowserContext) error {
+	// Try to load existing cookies first
+	if _, err := os.Stat(s.cookieFile); err == nil {
+		if err := s.loadCookies(context); err == nil {
+			fmt.Fprintln(os.Stderr, "✓ Loaded saved Twitter session")
+			return nil
+		}
+		fmt.Fprintln(os.Stderr, "⚠ Failed to load saved session, will need to login")
+	}
+
+	// No valid cookies, need to login manually
+	fmt.Fprintln(os.Stderr, "No saved session found, opening browser for login...")
+
+	// Create a page for login
+	page, err := context.NewPage()
+	if err != nil {
+		return err
+	}
+	defer page.Close()
+
+	// Perform manual login
+	if err := s.loginToTwitter(page); err != nil {
+		return err
+	}
+
+	// Save cookies for future use
+	if err := s.saveCookies(context); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ Warning: failed to save cookies: %v\n", err)
+	} else {
+		fmt.Fprintln(os.Stderr, "✓ Session cookies saved to", s.cookieFile)
+	}
+
+	return nil
 }
 
 // ScrapeHNPlaywright scrapes Hacker News using Playwright
@@ -309,24 +541,31 @@ func ScrapeNewsletterPlaywright(archiveURL string, selectors *scraper.Selectors,
 }
 
 // ScrapeTwitterTrending scrapes Twitter/X trending topics directly from x.com using Playwright
-func (s *PlaywrightScraper) ScrapeTwitterTrending(nitterInstance string, limit int) ([]scraper.NewsItem, error) {
-	page, err := s.newPage()
+func (s *PlaywrightScraper) ScrapeTwitterTrending(limit int) ([]scraper.NewsItem, error) {
+	page, context, err := s.newTwitterPage()
 	if err != nil {
 		return nil, err
 	}
+	defer context.Close()
 	defer page.Close()
 
 	// Go directly to X.com explore/trending
 	_, err = page.Goto("https://x.com/explore/tabs/trending", playwright.PageGotoOptions{
-		WaitUntil: playwright.WaitUntilStateNetworkidle,
-		Timeout:   playwright.Float(60000),
+		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
+		Timeout:   playwright.Float(90000),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to load X explore page: %w", err)
 	}
 
 	// Wait for content to load
-	page.WaitForTimeout(3000)
+	page.WaitForTimeout(5000)
+
+	// Scroll to load more trends
+	for i := 0; i < 2; i++ {
+		page.Evaluate("window.scrollBy(0, 800)")
+		page.WaitForTimeout(1000)
+	}
 
 	var items []scraper.NewsItem
 
@@ -418,25 +657,38 @@ func (s *PlaywrightScraper) ScrapeTwitterTrending(nitterInstance string, limit i
 }
 
 // ScrapeTwitterUser scrapes a user's timeline directly from x.com using Playwright
-func (s *PlaywrightScraper) ScrapeTwitterUser(nitterInstance string, username string, limit int) ([]scraper.NewsItem, error) {
-	page, err := s.newPage()
+func (s *PlaywrightScraper) ScrapeTwitterUser(username string, limit int) ([]scraper.NewsItem, error) {
+	page, context, err := s.newTwitterPage()
 	if err != nil {
 		return nil, err
 	}
+	defer context.Close()
 	defer page.Close()
 
 	// Go directly to X.com user page
 	userURL := fmt.Sprintf("https://x.com/%s", username)
 	_, err = page.Goto(userURL, playwright.PageGotoOptions{
-		WaitUntil: playwright.WaitUntilStateNetworkidle,
-		Timeout:   playwright.Float(60000),
+		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
+		Timeout:   playwright.Float(90000),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to load user timeline: %w", err)
 	}
 
-	// Wait for tweets to load
-	page.WaitForTimeout(3000)
+	// Wait for tweets to load - wait for the tweet article elements
+	page.WaitForTimeout(5000)
+
+	// Try to wait for tweet elements, but don't fail if they don't appear
+	page.WaitForSelector("article[data-testid=\"tweet\"]", playwright.PageWaitForSelectorOptions{
+		State:   playwright.WaitForSelectorStateAttached,
+		Timeout: playwright.Float(15000),
+	})
+
+	// Scroll to load more tweets
+	for i := 0; i < 3; i++ {
+		page.Evaluate("window.scrollBy(0, 1000)")
+		page.WaitForTimeout(1000)
+	}
 
 	var items []scraper.NewsItem
 
@@ -588,25 +840,33 @@ func (s *PlaywrightScraper) ScrapeTwitterUser(nitterInstance string, username st
 }
 
 // ScrapeTwitterTrendingPlaywright is a standalone function for Twitter trending
-func ScrapeTwitterTrendingPlaywright(nitterInstance string, limit int) ([]scraper.NewsItem, error) {
-	sc, err := NewPlaywrightScraper()
+func ScrapeTwitterTrendingPlaywright(limit int) ([]scraper.NewsItem, error) {
+	// Get credentials from environment variables
+	username := os.Getenv("TWITTER_USERNAME")
+	password := os.Getenv("TWITTER_PASSWORD")
+
+	sc, err := NewPlaywrightScraperWithAuth(username, password)
 	if err != nil {
 		return nil, err
 	}
 	defer sc.Close()
 
-	return sc.ScrapeTwitterTrending(nitterInstance, limit)
+	return sc.ScrapeTwitterTrending(limit)
 }
 
 // ScrapeTwitterUserPlaywright is a standalone function for Twitter user timeline
-func ScrapeTwitterUserPlaywright(nitterInstance string, username string, limit int) ([]scraper.NewsItem, error) {
-	sc, err := NewPlaywrightScraper()
+func ScrapeTwitterUserPlaywright(username string, limit int) ([]scraper.NewsItem, error) {
+	// Get credentials from environment variables
+	twitterUsername := os.Getenv("TWITTER_USERNAME")
+	twitterPassword := os.Getenv("TWITTER_PASSWORD")
+
+	sc, err := NewPlaywrightScraperWithAuth(twitterUsername, twitterPassword)
 	if err != nil {
 		return nil, err
 	}
 	defer sc.Close()
 
-	return sc.ScrapeTwitterUser(nitterInstance, username, limit)
+	return sc.ScrapeTwitterUser(username, limit)
 }
 
 // cleanTwitterTextPW removes extra whitespace from tweet text

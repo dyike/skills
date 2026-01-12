@@ -22,16 +22,15 @@ func (s *stringSlice) Set(value string) error {
 }
 
 var (
-	sources        stringSlice
-	newsletterURL  string
-	substackName   string
-	tldrCategory   string
-	twitterUser    string
-	nitterInstance string
-	limit          int
-	format         string
-	useBrowser     bool
-	output         string
+	sources       stringSlice
+	newsletterURL string
+	substackName  string
+	tldrCategory  string
+	twitterUser   string
+	limit         int
+	format        string
+	useBrowser    bool
+	output        string
 )
 
 func init() {
@@ -40,7 +39,6 @@ func init() {
 	flag.StringVar(&substackName, "substack-name", "", "Substack publication name (required for 'substack' source)")
 	flag.StringVar(&tldrCategory, "tldr-category", "tech", "TLDR category: tech, webdev, ai, crypto, devops, founders")
 	flag.StringVar(&twitterUser, "twitter-user", "", "Twitter username (required for 'twitter-user' source)")
-	flag.StringVar(&nitterInstance, "nitter", "nitter.net", "Nitter instance for Twitter scraping")
 	flag.IntVar(&limit, "limit", 20, "Max items per source")
 	flag.StringVar(&format, "format", "text", "Output format: text, markdown, json")
 	flag.BoolVar(&useBrowser, "use-browser", false, "Use Playwright browser (slower but handles JS)")
@@ -65,8 +63,8 @@ Examples:
   news-scraper -source newsletter -newsletter-url https://example.substack.com/archive
   news-scraper -source substack -substack-name stratechery
   news-scraper -source tldr -tldr-category ai
-  news-scraper -source twitter-trending -nitter nitter.net
-  news-scraper -source twitter-user -twitter-user elonmusk
+  news-scraper -source twitter-trending -use-browser
+  news-scraper -source twitter-user -twitter-user elonmusk -use-browser
   news-scraper -source hn -source ph -use-browser
 `)
 	}
@@ -172,24 +170,24 @@ Examples:
 			items, err = scraper.ScrapeTLDRHTTP(tldrCategory, limit)
 
 		case "twitter-trending":
-			fmt.Fprintf(os.Stderr, "Scraping Twitter trending (via %s)...\n", nitterInstance)
-			if useBrowser {
-				items, err = scraper.ScrapeTwitterTrendingPlaywright(nitterInstance, limit)
-			} else {
-				items, err = scraper.ScrapeTwitterTrendingHTTP(nitterInstance, limit)
+			if !useBrowser {
+				fmt.Fprintln(os.Stderr, "Error: twitter-trending requires -use-browser flag (X.com requires JavaScript)")
+				continue
 			}
+			fmt.Fprintln(os.Stderr, "Scraping Twitter trending from x.com...")
+			items, err = scraper.ScrapeTwitterTrendingPlaywright(limit)
 
 		case "twitter-user":
 			if twitterUser == "" {
 				fmt.Fprintln(os.Stderr, "Error: -twitter-user required for 'twitter-user' source")
 				continue
 			}
-			fmt.Fprintf(os.Stderr, "Scraping Twitter user @%s (via %s)...\n", twitterUser, nitterInstance)
-			if useBrowser {
-				items, err = scraper.ScrapeTwitterUserPlaywright(nitterInstance, twitterUser, limit)
-			} else {
-				items, err = scraper.ScrapeTwitterUserHTTP(nitterInstance, twitterUser, limit)
+			if !useBrowser {
+				fmt.Fprintln(os.Stderr, "Error: twitter-user requires -use-browser flag (X.com requires JavaScript)")
+				continue
 			}
+			fmt.Fprintf(os.Stderr, "Scraping Twitter user @%s from x.com...\n", twitterUser)
+			items, err = scraper.ScrapeTwitterUserPlaywright(twitterUser, limit)
 		}
 
 		if err != nil {
