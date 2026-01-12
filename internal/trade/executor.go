@@ -108,7 +108,7 @@ func (te *ToolExecutor) executeGetMarketData(ctx context.Context, params map[str
 
 	count := getInt(params, "count", 30)
 
-	data, err := te.marketClient.GetMarketData(ctx, symbol, count)
+	response, err := te.marketClient.GetMarketData(ctx, symbol, count)
 	if err != nil {
 		return &ToolCallResponse{
 			Success: false,
@@ -118,7 +118,7 @@ func (te *ToolExecutor) executeGetMarketData(ctx context.Context, params map[str
 
 	return &ToolCallResponse{
 		Success: true,
-		Result:  data,
+		Result:  response,
 	}
 }
 

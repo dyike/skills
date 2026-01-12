@@ -42,17 +42,17 @@ func GetAllTools() []Tool {
 func getMarketDataTool() Tool {
 	return Tool{
 		Name:        "get_market_data",
-		Description: "Get OHLCV (Open, High, Low, Close, Volume) candlestick data for a stock symbol. Requires Longport API credentials.",
+		Description: "Get comprehensive market data for a stock symbol including OHLCV (Open, High, Low, Close, Volume) candlestick data, statistical analysis (price changes, volatility, trading volume), and trend assessment. Returns detailed statistics like highest/lowest prices, average prices, up/down days, and a human-readable summary. Requires Longport API credentials.",
 		Parameters: ToolParameters{
 			Type: "object",
 			Properties: map[string]ToolProperty{
 				"symbol": {
 					Type:        "string",
-					Description: "Stock symbol with market suffix (e.g., 'AAPL.US' for US stocks, '700.HK' for Hong Kong stocks)",
+					Description: "Stock symbol with market suffix (e.g., 'AAPL.US' for US stocks, '700.HK' for Hong Kong stocks, '9988.HK' for Hong Kong stocks)",
 				},
 				"count": {
 					Type:        "integer",
-					Description: "Number of trading days to retrieve (default: 30, max: 1000)",
+					Description: "Number of trading days to retrieve (default: 30, max: 1000). More days provide better statistical analysis.",
 					Default:     30,
 				},
 			},

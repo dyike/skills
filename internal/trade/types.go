@@ -15,6 +15,43 @@ type MarketData struct {
 	Volume int64   `json:"volume"`
 }
 
+// PriceChange represents price change statistics
+type PriceChange struct {
+	Amount      float64 `json:"amount"`
+	Percent     float64 `json:"percent"`
+	Description string  `json:"description"`
+}
+
+// MarketDataStats represents statistical analysis of market data
+type MarketDataStats struct {
+	TotalDays       int          `json:"total_days"`
+	StartDate       string       `json:"start_date"`
+	EndDate         string       `json:"end_date"`
+	StartPrice      float64      `json:"start_price"`
+	EndPrice        float64      `json:"end_price"`
+	HighestPrice    float64      `json:"highest_price"`
+	HighestDate     string       `json:"highest_date"`
+	LowestPrice     float64      `json:"lowest_price"`
+	LowestDate      string       `json:"lowest_date"`
+	AveragePrice    float64      `json:"average_price"`
+	AverageVolume   int64        `json:"average_volume"`
+	TotalVolume     int64        `json:"total_volume"`
+	PriceChange     *PriceChange `json:"price_change"`
+	Volatility      float64      `json:"volatility"`
+	UpDays          int          `json:"up_days"`
+	DownDays        int          `json:"down_days"`
+	UnchangedDays   int          `json:"unchanged_days"`
+}
+
+// MarketDataResponse represents enhanced market data with statistics
+type MarketDataResponse struct {
+	Symbol  string           `json:"symbol"`
+	Count   int              `json:"count"`
+	Data    []*MarketData    `json:"data"`
+	Stats   *MarketDataStats `json:"stats"`
+	Summary string           `json:"summary"`
+}
+
 // IndicatorValue represents a single indicator data point
 type IndicatorValue struct {
 	Date  string  `json:"date"`

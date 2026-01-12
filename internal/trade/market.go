@@ -46,8 +46,8 @@ func NewMarketClient(cfg LongportConfig) (*MarketClient, error) {
 	}, nil
 }
 
-// GetMarketData retrieves market data for a specific symbol
-func (mc *MarketClient) GetMarketData(ctx context.Context, symbol string, count int) ([]*MarketData, error) {
+// GetMarketData retrieves market data for a specific symbol with statistical analysis
+func (mc *MarketClient) GetMarketData(ctx context.Context, symbol string, count int) (*MarketDataResponse, error) {
 	if mc.quoteCtx == nil {
 		return nil, errors.New("quote context is nil")
 	}
@@ -64,7 +64,21 @@ func (mc *MarketClient) GetMarketData(ctx context.Context, symbol string, count 
 		return nil, fmt.Errorf("failed to get candlesticks: %w", err)
 	}
 
-	return convertCandlesticks(symbol, sticks), nil
+	marketData := convertCandlesticks(symbol, sticks)
+	if len(marketData) == 0 {
+		return nil, fmt.Errorf("no market data available for symbol %s", symbol)
+	}
+
+	stats := calculateMarketStats(marketData)
+	summary := generateMarketSummary(symbol, stats)
+
+	return &MarketDataResponse{
+		Symbol:  symbol,
+		Count:   len(marketData),
+		Data:    marketData,
+		Stats:   stats,
+		Summary: summary,
+	}, nil
 }
 
 // GetStockIndicators calculates technical indicators for a stock
@@ -477,4 +491,186 @@ func generateTechnicalSummary(indicators map[string][]IndicatorValue) string {
 	}
 
 	return summary.String()
+}
+
+// calculateMarketStats calculates comprehensive market statistics
+func calculateMarketStats(data []*MarketData) *MarketDataStats {
+	if len(data) == 0 {
+		return nil
+	}
+
+	stats := &MarketDataStats{
+		TotalDays: len(data),
+	}
+
+	// Sort by date to ensure proper ordering
+	sort.Slice(data, func(i, j int) bool {
+		return data[i].Date < data[j].Date
+	})
+
+	// Basic date and price info
+	stats.StartDate = data[0].Date
+	stats.EndDate = data[len(data)-1].Date
+	stats.StartPrice = data[0].Close
+	stats.EndPrice = data[len(data)-1].Close
+
+	// Calculate price change
+	priceChange := stats.EndPrice - stats.StartPrice
+	priceChangePercent := 0.0
+	if stats.StartPrice > 0 {
+		priceChangePercent = (priceChange / stats.StartPrice) * 100
+	}
+
+	changeDirection := "unchanged"
+	if priceChange > 0 {
+		changeDirection = "increased"
+	} else if priceChange < 0 {
+		changeDirection = "decreased"
+	}
+
+	stats.PriceChange = &PriceChange{
+		Amount:      priceChange,
+		Percent:     priceChangePercent,
+		Description: fmt.Sprintf("Price %s by $%.2f (%.2f%%)", changeDirection, math.Abs(priceChange), math.Abs(priceChangePercent)),
+	}
+
+	// Find highest and lowest prices
+	stats.HighestPrice = data[0].High
+	stats.HighestDate = data[0].Date
+	stats.LowestPrice = data[0].Low
+	stats.LowestDate = data[0].Date
+
+	var totalPrice float64
+	var totalVolume int64
+
+	for _, d := range data {
+		if d.High > stats.HighestPrice {
+			stats.HighestPrice = d.High
+			stats.HighestDate = d.Date
+		}
+		if d.Low < stats.LowestPrice {
+			stats.LowestPrice = d.Low
+			stats.LowestDate = d.Date
+		}
+		totalPrice += d.Close
+		totalVolume += d.Volume
+	}
+
+	stats.AveragePrice = totalPrice / float64(len(data))
+	stats.TotalVolume = totalVolume
+	if len(data) > 0 {
+		stats.AverageVolume = totalVolume / int64(len(data))
+	}
+
+	// Calculate daily price changes
+	for i := 1; i < len(data); i++ {
+		dailyChange := data[i].Close - data[i-1].Close
+		if dailyChange > 0 {
+			stats.UpDays++
+		} else if dailyChange < 0 {
+			stats.DownDays++
+		} else {
+			stats.UnchangedDays++
+		}
+	}
+
+	// Calculate volatility (standard deviation of daily returns)
+	if len(data) > 1 {
+		var returns []float64
+		for i := 1; i < len(data); i++ {
+			if data[i-1].Close > 0 {
+				dailyReturn := (data[i].Close - data[i-1].Close) / data[i-1].Close
+				returns = append(returns, dailyReturn)
+			}
+		}
+
+		if len(returns) > 0 {
+			var sumReturns float64
+			for _, r := range returns {
+				sumReturns += r
+			}
+			meanReturn := sumReturns / float64(len(returns))
+
+			var variance float64
+			for _, r := range returns {
+				variance += (r - meanReturn) * (r - meanReturn)
+			}
+			variance /= float64(len(returns))
+
+			stats.Volatility = math.Sqrt(variance) * 100 // Convert to percentage
+		}
+	}
+
+	return stats
+}
+
+// generateMarketSummary creates a human-readable summary of market data
+func generateMarketSummary(symbol string, stats *MarketDataStats) string {
+	if stats == nil {
+		return fmt.Sprintf("No data available for %s", symbol)
+	}
+
+	var summary strings.Builder
+
+	summary.WriteString(fmt.Sprintf("**Market Data Summary for %s**\n\n", symbol))
+
+	summary.WriteString(fmt.Sprintf("**Period:** %s to %s (%d trading days)\n\n",
+		stats.StartDate, stats.EndDate, stats.TotalDays))
+
+	summary.WriteString("**Price Movement:**\n")
+	summary.WriteString(fmt.Sprintf("- Opening Price: $%.2f\n", stats.StartPrice))
+	summary.WriteString(fmt.Sprintf("- Latest Price: $%.2f\n", stats.EndPrice))
+	summary.WriteString(fmt.Sprintf("- %s\n\n", stats.PriceChange.Description))
+
+	summary.WriteString("**Price Range:**\n")
+	summary.WriteString(fmt.Sprintf("- Highest: $%.2f (on %s)\n", stats.HighestPrice, stats.HighestDate))
+	summary.WriteString(fmt.Sprintf("- Lowest: $%.2f (on %s)\n", stats.LowestPrice, stats.LowestDate))
+	summary.WriteString(fmt.Sprintf("- Average: $%.2f\n\n", stats.AveragePrice))
+
+	summary.WriteString("**Trading Activity:**\n")
+	summary.WriteString(fmt.Sprintf("- Total Volume: %s shares\n", formatVolume(stats.TotalVolume)))
+	summary.WriteString(fmt.Sprintf("- Average Daily Volume: %s shares\n\n", formatVolume(stats.AverageVolume)))
+
+	summary.WriteString("**Market Dynamics:**\n")
+	summary.WriteString(fmt.Sprintf("- Up Days: %d (%.1f%%)\n",
+		stats.UpDays, float64(stats.UpDays)/float64(stats.TotalDays-1)*100))
+	summary.WriteString(fmt.Sprintf("- Down Days: %d (%.1f%%)\n",
+		stats.DownDays, float64(stats.DownDays)/float64(stats.TotalDays-1)*100))
+	summary.WriteString(fmt.Sprintf("- Volatility: %.2f%%\n", stats.Volatility))
+
+	// Add trend assessment
+	summary.WriteString("\n**Trend Assessment:**\n")
+	if stats.PriceChange.Percent > 5 {
+		summary.WriteString("- Strong UPWARD trend\n")
+	} else if stats.PriceChange.Percent > 0 {
+		summary.WriteString("- Moderate UPWARD trend\n")
+	} else if stats.PriceChange.Percent < -5 {
+		summary.WriteString("- Strong DOWNWARD trend\n")
+	} else if stats.PriceChange.Percent < 0 {
+		summary.WriteString("- Moderate DOWNWARD trend\n")
+	} else {
+		summary.WriteString("- FLAT / No clear trend\n")
+	}
+
+	if stats.Volatility > 3 {
+		summary.WriteString("- HIGH volatility (risky)\n")
+	} else if stats.Volatility > 1.5 {
+		summary.WriteString("- MODERATE volatility\n")
+	} else {
+		summary.WriteString("- LOW volatility (stable)\n")
+	}
+
+	return summary.String()
+}
+
+// formatVolume formats large numbers for readability
+func formatVolume(volume int64) string {
+	if volume >= 1000000000 {
+		return fmt.Sprintf("%.2fB", float64(volume)/1000000000)
+	} else if volume >= 1000000 {
+		return fmt.Sprintf("%.2fM", float64(volume)/1000000)
+	} else if volume >= 1000 {
+		return fmt.Sprintf("%.2fK", float64(volume)/1000)
+	}
+	return fmt.Sprintf("%d", volume)
 }
