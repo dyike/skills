@@ -13,7 +13,7 @@ Scrape tech news from multiple sources using cobra subcommands.
 news-scraper [command] [flags]
 ```
 
-## Available Commands
+### Available Commands
 
 | Command | Description | Requirements |
 |---------|-------------|--------------|
@@ -24,7 +24,7 @@ news-scraper [command] [flags]
 | `newsletter` | Scrape any newsletter archive | `-u url` required |
 | `xhs` | Scrape Xiaohongshu (Little Red Book) | None |
 
-## Global Flags
+### Global Flags
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
@@ -36,28 +36,28 @@ news-scraper [command] [flags]
 
 ```bash
 # Hacker News top 30
-news-scraper hn -l 30
+./scripts/news-scraper hn -l 30
 
 # Product Hunt in markdown format
-news-scraper ph -f markdown
+./scripts/news-scraper ph -f markdown
 
 # Save to file
-news-scraper hn -l 20 -o news.md
+./scripts/news-scraper hn -l 20 -o news.md
 
 # Twitter trending topics
-news-scraper twitter-trending -l 10
+./scripts/news-scraper twitter-trending -l 10
 
 # Twitter user timeline
-news-scraper twitter-user -u elonmusk -l 10
+./scripts/news-scraper twitter-user -u elonmusk -l 10
 
 # Newsletter archive
-news-scraper newsletter -u https://example.substack.com/archive
+./scripts/news-scraper newsletter -u https://example.substack.com/archive
 
 # Xiaohongshu
-news-scraper xhs -l 5
+./scripts/news-scraper xhs -l 5
 
 # JSON output
-news-scraper hn -f json
+./scripts/news-scraper hn -f json
 ```
 
 ## Output Formats
@@ -91,22 +91,7 @@ Twitter/X scraping is handled by modu's scraper package, which uses persistent b
 2. **Subsequent runs**: Uses saved session in headless mode
 3. **Session expires**: Browser opens again for re-login
 
-### Security
-
-- No credentials stored in config
-- Session cookies managed by modu package
-- Delete session to force re-login
-
-## Architecture
-
-```
-cmd/news-scraper/main.go          # Entry point (3 lines)
-internal/scraper/cmd.go            # Cobra commands & logic
-github.com/crosszan/modu/repos/scraper  # Core scraping (external)
-```
-
 ## Troubleshooting
-
 - **Empty results**: Check network connection, site may be blocking
 - **Twitter fails**: First run opens browser for login, complete the login process
 - **Rate limited**: Reduce `-l` limit value
