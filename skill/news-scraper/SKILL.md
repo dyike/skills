@@ -1,56 +1,63 @@
 ---
 name: news-scraper
-description: Scrape latest content from tech news sources including Hacker News, Product Hunt, Twitter/X, Substack newsletters, and TLDR newsletters. Use when Claude needs to fetch current headlines, trending topics, or newsletter archives without API access. Supports both HTTP-based and browser-based (Playwright) scraping methods.
+description: Scrape latest content from tech news sources including Hacker News, Product Hunt, Twitter/X, Xiaohongshu, and newsletters. Use when you need to fetch current headlines, trending topics, or newsletter archives. Built on github.com/crosszan/modu scraper package.
 ---
 
 # News Scraper
 
-Scrape tech news from multiple sources.
+Scrape tech news from multiple sources using cobra subcommands.
 
 ## Usage
 
 ```bash
-news-scraper -source hn -source ph -limit 20 -format markdown
+news-scraper [command] [flags]
 ```
 
-## Supported Sources
+## Available Commands
 
-| Source | Flag | Description | Requirements |
-|--------|------|-------------|--------------|
-| Hacker News | `hn` | Front page stories with scores | HTTP works |
-| Product Hunt | `ph` | Today's products with upvotes | HTTP limited, Playwright better |
-| Twitter Trending | `twitter-trending` | Trending topics from x.com | Requires `-use-browser` (scrapes directly from x.com) |
-| Twitter User | `twitter-user` | User timeline from x.com | Requires `-use-browser` and `-twitter-user` (scrapes directly from x.com) |
-| Newsletter | `newsletter` | Any newsletter archive | Requires `-newsletter-url` |
-| Substack | `substack` | Substack publications | Requires `-substack-name` |
-| TLDR | `tldr` | TLDR newsletters | Categories: tech, ai, webdev, crypto, devops, founders |
+| Command | Description | Requirements |
+|---------|-------------|--------------|
+| `hn` | Scrape Hacker News front page | None |
+| `ph` | Scrape Product Hunt today's products | None |
+| `twitter-trending` | Scrape trending topics from x.com | Twitter login (modu handles auth) |
+| `twitter-user` | Scrape user timeline from x.com | `-u username` required |
+| `newsletter` | Scrape any newsletter archive | `-u url` required |
+| `xhs` | Scrape Xiaohongshu (Little Red Book) | None |
+
+## Global Flags
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--limit` | `-l` | 20 | Max items to scrape |
+| `--format` | `-f` | text | Output format: text, markdown, json |
+| `--output` | `-o` | stdout | Output file path |
 
 ## Examples
 
 ```bash
 # Hacker News top 30
-news-scraper -source hn -limit 30
+news-scraper hn -l 30
 
-# Multiple sources to markdown
-news-scraper -source hn -source ph -format markdown -o news.md
+# Product Hunt in markdown format
+news-scraper ph -f markdown
 
-# Twitter trending topics from x.com (requires browser)
-news-scraper -source twitter-trending -limit 10 -use-browser
+# Save to file
+news-scraper hn -l 20 -o news.md
 
-# Twitter user timeline from x.com (requires browser)
-news-scraper -source twitter-user -twitter-user elonmusk -limit 10 -use-browser
+# Twitter trending topics
+news-scraper twitter-trending -l 10
 
-# Substack newsletter
-news-scraper -source substack -substack-name stratechery -limit 10
+# Twitter user timeline
+news-scraper twitter-user -u elonmusk -l 10
 
-# Custom newsletter archive
-news-scraper -source newsletter -newsletter-url https://example.com/archive
+# Newsletter archive
+news-scraper newsletter -u https://example.substack.com/archive
 
-# TLDR AI newsletter
-news-scraper -source tldr -tldr-category ai
+# Xiaohongshu
+news-scraper xhs -l 5
 
-# Use Playwright for JS-heavy sites
-news-scraper -source ph -use-browser
+# JSON output
+news-scraper hn -f json
 ```
 
 ## Output Formats
@@ -65,7 +72,7 @@ news-scraper -source ph -use-browser
 {
   "title": "Article Title",
   "url": "https://...",
-  "source": "hackernews|producthunt|twitter-trending|twitter-user|newsletter|substack|tldr-*",
+  "source": "hackernews|producthunt|twitter-trending|twitter-user|newsletter|xhs",
   "score": 123,
   "comments": 45,
   "author": "username",
@@ -76,72 +83,30 @@ news-scraper -source ph -use-browser
 
 ## Twitter/X Authentication
 
-Twitter/X requires authentication to view trending topics and user timelines. The scraper supports **manual browser login** with session persistence.
+Twitter/X scraping is handled by modu's scraper package, which uses persistent browser context for authentication.
 
 ### How it works
 
-1. **First run**:
-   - Browser window will open automatically (visible, not headless)
-   - You manually log in to Twitter/X (supports 2FA, email verification, etc.)
-   - After successful login, cookies are saved to `~/.news-scraper/twitter-cookies.json`
-   - Scraper continues automatically
+1. **First run**: Browser opens for manual login, session saved automatically
+2. **Subsequent runs**: Uses saved session in headless mode
+3. **Session expires**: Browser opens again for re-login
 
-2. **Subsequent runs**:
-   - Scraper reuses saved cookies in headless mode
-   - No browser window needed
-   - Much faster execution
+### Security
 
-3. **Session expires**:
-   - Browser window opens again for re-login
-   - Process repeats automatically
+- No credentials stored in config
+- Session cookies managed by modu package
+- Delete session to force re-login
 
-### Example
+## Architecture
 
-```bash
-# First run - browser will open for manual login
-news-scraper -source twitter-trending -limit 10 -use-browser
-# -> Browser opens, you log in manually, window closes automatically
-
-# Subsequent runs - uses saved session (headless)
-news-scraper -source twitter-user -twitter-user elonmusk -limit 20 -use-browser
-# -> Runs in background, no browser window
-
-# Multiple sources work too
-news-scraper -source twitter-trending -source twitter-user -twitter-user elonmusk -use-browser
 ```
-
-### Manual Login Process
-
-When the browser opens:
-1. Complete the Twitter/X login form
-2. Handle 2FA if enabled
-3. Complete any email/phone verification
-4. Wait for redirect to home timeline
-5. Browser will close automatically
-6. Scraper continues and saves your session
-
-### Security Notes
-
-- **No credentials stored** - you log in manually each time session expires
-- Cookies saved locally in `~/.news-scraper/twitter-cookies.json`
-- Never commit this file to version control
-- Session typically lasts for weeks/months
-- Delete cookie file to force fresh login: `rm ~/.news-scraper/twitter-cookies.json`
+cmd/news-scraper/main.go          # Entry point (3 lines)
+internal/scraper/cmd.go            # Cobra commands & logic
+github.com/crosszan/modu/repos/scraper  # Core scraping (external)
+```
 
 ## Troubleshooting
 
-- **Product Hunt returns empty**: Use `-use-browser` flag
-- **Twitter scraping fails**:
-  - Twitter sources require `-use-browser` flag (scrapes directly from x.com which requires JavaScript)
-  - Check if saved cookies exist at `~/.news-scraper/twitter-cookies.json`
-  - Try deleting the cookie file to force a fresh login: `rm ~/.news-scraper/twitter-cookies.json`
-  - On first run, wait for browser window to open
-- **Browser doesn't open for Twitter login**:
-  - Make sure you have Playwright browsers installed
-  - Check that you're using the `-use-browser` flag
-  - Browser will only open if no saved session exists
-- **Login hangs or times out**:
-  - You have 5 minutes to complete login
-  - Make sure you complete all verification steps
-  - Browser will auto-close after successful login (when home timeline loads)
-- **Rate limited**: Reduce `-limit` value or add delays between requests
+- **Empty results**: Check network connection, site may be blocking
+- **Twitter fails**: First run opens browser for login, complete the login process
+- **Rate limited**: Reduce `-l` limit value
