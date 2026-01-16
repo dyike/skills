@@ -22,6 +22,8 @@ var cfg struct {
 	inputFile  string
 	topic      string
 	style      string // stanley, defou, combo, all
+	imageMode  string // auto, placeholder, none
+	withImages bool   // 是否生成配图
 }
 
 // NewCmd 创建根命令
@@ -46,6 +48,7 @@ func NewCmd() *cobra.Command {
 		newGenerateCmd(),
 		newVerifyCmd(),
 		newAutoCmd(),
+		newImageCmd(),
 	)
 
 	return root
@@ -220,16 +223,75 @@ func newVerifyCmd() *cobra.Command {
 	return cmd
 }
 
+// newImageCmd 图片生成命令
+func newImageCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "image",
+		Short: "为文章生成配图",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if cfg.inputFile == "" {
+				return fmt.Errorf("请提供 --input 参数指定文章文件")
+			}
+
+			content, err := os.ReadFile(cfg.inputFile)
+			if err != nil {
+				return fmt.Errorf("读取文件失败: %w", err)
+			}
+
+			fmt.Fprintf(os.Stderr, "🎨 正在为文章生成配图...\\n")
+			fmt.Fprintf(os.Stderr, "📄 文章文件: %s\\n", cfg.inputFile)
+			fmt.Fprintf(os.Stderr, "🔧 配图模式: %s\\n\\n", cfg.imageMode)
+
+			imageGen := NewImageGenerator(cfg.outputDir)
+			if cfg.imageMode == "" {
+				cfg.imageMode = "auto"
+			}
+
+			contentWithImages, imagePaths, err := imageGen.GenerateImagesForArticle(string(content), cfg.imageMode)
+			if err != nil {
+				return fmt.Errorf("生成配图失败: %w", err)
+			}
+
+			if len(imagePaths) == 0 {
+				fmt.Fprintf(os.Stderr, "ℹ️ 未生成任何配图\\n")
+				return nil
+			}
+
+			// 保存带配图的文章
+			outputPath, err := saveWithImages(contentWithImages)
+			if err != nil {
+				return fmt.Errorf("保存失败: %w", err)
+			}
+
+			fmt.Fprintf(os.Stderr, "\\n✅ 配图生成完成！\\n")
+			fmt.Fprintf(os.Stderr, "📸 生成 %d 张配图\\n", len(imagePaths))
+			fmt.Fprintf(os.Stderr, "💾 文章已保存: %s\\n", outputPath)
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&cfg.inputFile, "input", "i", "", "输入文章文件路径")
+	cmd.Flags().StringVar(&cfg.imageMode, "mode", "auto", "配图模式: auto(AI自动分析), placeholder(识别占位符)")
+
+	return cmd
+}
+
 // newAutoCmd 全自动命令
 func newAutoCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "auto",
-		Short: "全自动模式：抓取 -> 生成 -> 验证",
+		Short: "全自动模式：抓取 -> 生成 -> 配图 -> 验证",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintf(os.Stderr, "🚀 启动全自动内容创作流程...\n\n")
+			totalSteps := 3
+			if cfg.withImages {
+				totalSteps = 4
+			}
+
+			fmt.Fprintf(os.Stderr, "🚀 启动全自动内容创作流程...\\n\\n")
 
 			// Step 1: 抓取热点
-			fmt.Fprintf(os.Stderr, "【步骤 1/3】抓取热点\n")
+			fmt.Fprintf(os.Stderr, "【步骤 1/%d】抓取热点\\n", totalSteps)
 			var topics []HotTopic
 			var err error
 
@@ -244,10 +306,10 @@ func newAutoCmd() *cobra.Command {
 			}
 
 			topics = DeduplicateTopics(topics)
-			fmt.Fprintf(os.Stderr, "✅ 抓取成功: %d 条热点\n\n", len(topics))
+			fmt.Fprintf(os.Stderr, "✅ 抓取成功: %d 条热点\\n\\n", len(topics))
 
 			// Step 2: 生成内容
-			fmt.Fprintf(os.Stderr, "【步骤 2/3】生成内容\n")
+			fmt.Fprintf(os.Stderr, "【步骤 2/%d】生成内容\\n", totalSteps)
 
 			client := NewClaudeClient()
 			if cfg.apiKey != "" {
@@ -276,7 +338,7 @@ func newAutoCmd() *cobra.Command {
 				return fmt.Errorf("没有可用的话题")
 			}
 
-			fmt.Fprintf(os.Stderr, "📝 选定话题: %s\n", selectedTopic)
+			fmt.Fprintf(os.Stderr, "📝 选定话题: %s\\n", selectedTopic)
 
 			req := &GenerateRequest{
 				Topic:   selectedTopic,
@@ -294,15 +356,39 @@ func newAutoCmd() *cobra.Command {
 				return fmt.Errorf("生成失败: %w", err)
 			}
 
+			fmt.Fprintf(os.Stderr, "✅ 生成完成\\n\\n")
+
+			// Step 3 (可选): 生成配图
+			currentStep := 3
+			if cfg.withImages {
+				fmt.Fprintf(os.Stderr, "【步骤 %d/%d】生成配图\\n", currentStep, totalSteps)
+
+				imageGen := NewImageGenerator(cfg.outputDir)
+				imageMode := cfg.imageMode
+				if imageMode == "" {
+					imageMode = "auto"
+				}
+
+				contentWithImages, imagePaths, err := imageGen.GenerateImagesForArticle(content, imageMode)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "⚠️ 配图生成失败: %v，继续使用原文\\n", err)
+				} else if len(imagePaths) > 0 {
+					content = contentWithImages
+					fmt.Fprintf(os.Stderr, "✅ 生成 %d 张配图\\n\\n", len(imagePaths))
+				} else {
+					fmt.Fprintf(os.Stderr, "ℹ️ 无需生成配图\\n\\n")
+				}
+				currentStep++
+			}
+
+			// 保存生成的内容
 			generatedFile, err := saveGenerated(content, "combo")
 			if err != nil {
 				return fmt.Errorf("保存失败: %w", err)
 			}
 
-			fmt.Fprintf(os.Stderr, "✅ 生成完成\n\n")
-
-			// Step 3: 验证优化
-			fmt.Fprintf(os.Stderr, "【步骤 3/3】验证优化\n")
+			// Step: 验证优化
+			fmt.Fprintf(os.Stderr, "【步骤 %d/%d】验证优化\\n", currentStep, totalSteps)
 
 			verifyPrompt, err := loadPrompt("verify")
 			if err != nil {
@@ -318,12 +404,17 @@ func newAutoCmd() *cobra.Command {
 				return fmt.Errorf("保存失败: %w", err)
 			}
 
-			fmt.Fprintf(os.Stderr, "✅ 验证完成\n\n")
-			fmt.Fprintf(os.Stderr, "🎉 全流程完成！生成文件: %s\n", generatedFile)
+			fmt.Fprintf(os.Stderr, "✅ 验证完成\\n\\n")
+			fmt.Fprintf(os.Stderr, "🎉 全流程完成！生成文件: %s\\n", generatedFile)
 
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&cfg.withImages, "with-images", false, "是否生成配图")
+	cmd.Flags().StringVar(&cfg.imageMode, "image-mode", "auto", "配图模式: auto, placeholder")
+
+	return cmd
 }
 
 // 辅助函数
@@ -414,6 +505,23 @@ func saveVerified(result string) error {
 
 	fmt.Fprintf(os.Stderr, "💾 验证报告已保存: %s\n", outputPath)
 	return nil
+}
+
+func saveWithImages(content string) (string, error) {
+	genDir := filepath.Join(cfg.outputDir, "generated")
+	if err := os.MkdirAll(genDir, 0755); err != nil {
+		return "", err
+	}
+
+	timestamp := time.Now().Format("20060102_150405")
+	filename := fmt.Sprintf("article_with_images_%s.md", timestamp)
+	outputPath := filepath.Join(genDir, filename)
+
+	if err := os.WriteFile(outputPath, []byte(content), 0644); err != nil {
+		return "", err
+	}
+
+	return outputPath, nil
 }
 
 func loadPrompt(style string) (string, error) {
