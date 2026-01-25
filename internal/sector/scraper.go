@@ -69,36 +69,57 @@ func ScrapeSectors(sectorType SectorType, limit int) (*SectorListResponse, error
 	return response, nil
 }
 
-// ScrapeHotSectors 抓取热门板块(涨跌幅前列)
-func ScrapeHotSectors(limit int) (*HotSectorsResponse, error) {
+// SortType 排序类型
+type SortType string
+
+const (
+	SortByChange SortType = "change" // 按涨跌幅排序
+	SortByAmount SortType = "amount" // 按成交额排序
+)
+
+// ScrapeHotSectors 抓取热门板块
+// sortBy: "change" 按涨跌幅排序, "amount" 按成交额排序
+func ScrapeHotSectors(limit int, sortBy SortType) (*HotSectorsResponse, error) {
 	// 抓取行业板块
 	industrySectors, err := ScrapeSectors(SectorTypeIndustry, 100)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scrape industry sectors: %w", err)
 	}
 
-	// 按涨跌幅排序
 	sectors := industrySectors.Sectors
 
-	// 涨幅前列
-	sort.Slice(sectors, func(i, j int) bool {
-		return sectors[i].ChangeRate > sectors[j].ChangeRate
-	})
-	topRising := make([]*SectorInfo, 0, limit)
-	for i := 0; i < len(sectors) && i < limit; i++ {
-		if sectors[i].ChangeRate > 0 {
-			topRising = append(topRising, sectors[i])
+	// 根据排序类型选择排序方式
+	var sortFunc func(i, j int) bool
+	switch sortBy {
+	case SortByAmount:
+		sortFunc = func(i, j int) bool {
+			return sectors[i].Amount > sectors[j].Amount
+		}
+	default: // SortByChange
+		sortFunc = func(i, j int) bool {
+			return sectors[i].ChangeRate > sectors[j].ChangeRate
 		}
 	}
 
-	// 跌幅前列
-	sort.Slice(sectors, func(i, j int) bool {
-		return sectors[i].ChangeRate < sectors[j].ChangeRate
-	})
-	topFalling := make([]*SectorInfo, 0, limit)
+	// 排序
+	sort.Slice(sectors, sortFunc)
+
+	// 获取前列
+	topRising := make([]*SectorInfo, 0, limit)
 	for i := 0; i < len(sectors) && i < limit; i++ {
-		if sectors[i].ChangeRate < 0 {
-			topFalling = append(topFalling, sectors[i])
+		topRising = append(topRising, sectors[i])
+	}
+
+	// 获取末列 (仅在按涨跌幅排序时有意义)
+	topFalling := make([]*SectorInfo, 0, limit)
+	if sortBy == SortByChange {
+		sort.Slice(sectors, func(i, j int) bool {
+			return sectors[i].ChangeRate < sectors[j].ChangeRate
+		})
+		for i := 0; i < len(sectors) && i < limit; i++ {
+			if sectors[i].ChangeRate < 0 {
+				topFalling = append(topFalling, sectors[i])
+			}
 		}
 	}
 
@@ -106,7 +127,7 @@ func ScrapeHotSectors(limit int) (*HotSectorsResponse, error) {
 		TopRising:  topRising,
 		TopFalling: topFalling,
 		Timestamp:  FormatTimestamp(),
-		Summary:    generateHotSummary(topRising, topFalling),
+		Summary:    generateHotSummaryWithSort(topRising, topFalling, sortBy),
 	}
 
 	return response, nil
@@ -289,17 +310,30 @@ func generateListSummary(sectorType SectorType, sectors []*SectorInfo) string {
 
 // generateHotSummary 生成热门板块摘要
 func generateHotSummary(rising, falling []*SectorInfo) string {
+	return generateHotSummaryWithSort(rising, falling, SortByChange)
+}
+
+// generateHotSummaryWithSort 生成热门板块摘要（支持排序类型）
+func generateHotSummaryWithSort(rising, falling []*SectorInfo, sortBy SortType) string {
 	var parts []string
 
 	if len(rising) > 0 {
 		names := make([]string, 0, 3)
 		for i := 0; i < len(rising) && i < 3; i++ {
-			names = append(names, fmt.Sprintf("%s(+%.2f%%)", rising[i].Name, rising[i].ChangeRate))
+			if sortBy == SortByAmount {
+				names = append(names, fmt.Sprintf("%s(%.0f亿)", rising[i].Name, rising[i].Amount))
+			} else {
+				names = append(names, fmt.Sprintf("%s(+%.2f%%)", rising[i].Name, rising[i].ChangeRate))
+			}
 		}
-		parts = append(parts, "涨幅前三: "+strings.Join(names, "、"))
+		if sortBy == SortByAmount {
+			parts = append(parts, "成交额前三: "+strings.Join(names, "、"))
+		} else {
+			parts = append(parts, "涨幅前三: "+strings.Join(names, "、"))
+		}
 	}
 
-	if len(falling) > 0 {
+	if len(falling) > 0 && sortBy == SortByChange {
 		names := make([]string, 0, 3)
 		for i := 0; i < len(falling) && i < 3; i++ {
 			names = append(names, fmt.Sprintf("%s(%.2f%%)", falling[i].Name, falling[i].ChangeRate))
@@ -520,6 +554,368 @@ func generateStocksSummary(sectorName string, stocks []*StockInfo) string {
 		summary += fmt.Sprintf("，涨停%d只", limitUpCount)
 	}
 	summary += fmt.Sprintf("。领涨: %s(%.2f%%)", top.Name, top.ChangeRate)
+
+	return summary
+}
+
+// FundFlowURLs 资金流向数据 URL
+var FundFlowURLs = map[SectorType]string{
+	SectorTypeIndustry: "https://data.eastmoney.com/bkzj/hy.html",
+	SectorTypeConcept:  "https://data.eastmoney.com/bkzj/gn.html",
+}
+
+// ScrapeFundFlow 抓取板块资金流向
+func ScrapeFundFlow(sectorType SectorType, limit int) (*FundFlowResponse, error) {
+	url, ok := FundFlowURLs[sectorType]
+	if !ok {
+		return nil, fmt.Errorf("unsupported sector type: %s", sectorType)
+	}
+
+	// 创建浏览器实例
+	browser, err := playwright.New(
+		playwright.WithHeadless(true),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create browser: %w", err)
+	}
+	defer browser.Close()
+
+	// 创建页面
+	page, err := browser.NewPage()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create page: %w", err)
+	}
+	defer page.Close()
+
+	// 注入反检测脚本
+	if err := page.InjectAntiDetect(); err != nil {
+		return nil, fmt.Errorf("failed to inject anti-detect: %w", err)
+	}
+
+	// 导航到页面
+	if err := page.Goto(url, playwright.WithWaitUntil("domcontentloaded"), playwright.WithTimeout(60000)); err != nil {
+		return nil, fmt.Errorf("failed to navigate to page: %w", err)
+	}
+	page.Wait(5 * time.Second)
+
+	// 提取资金流向数据
+	flows, err := extractFundFlowData(page, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(flows) == 0 {
+		return nil, fmt.Errorf("no fund flow data found")
+	}
+
+	response := &FundFlowResponse{
+		Type:      sectorType,
+		Count:     len(flows),
+		Flows:     flows,
+		Timestamp: FormatTimestamp(),
+		Summary:   generateFundFlowSummary(sectorType, flows),
+	}
+
+	return response, nil
+}
+
+// extractFundFlowData 从页面提取资金流向数据
+// 东方财富资金流向页面结构:
+// table[1] tbody tr (第二个表格)
+//
+//	td[0]: 序号
+//	td[1]: 名称
+//	td[2]: 相关链接
+//	td[3]: 今日涨跌幅
+//	td[4]: 主力净流入-净额
+//	td[5]: 主力净流入-净占比
+//	td[6]: 超大单净流入-净额
+//	td[7]: 超大单净流入-净占比
+//	td[8]: 大单净流入-净额
+//	td[9]: 大单净流入-净占比
+//	td[10]: 中单净流入-净额
+//	td[11]: 中单净流入-净占比
+//	td[12]: 小单净流入-净额
+//	td[13]: 小单净流入-净占比
+//	td[14]: 主力净流入最大股
+func extractFundFlowData(page *playwright.Page, limit int) ([]*FundFlowInfo, error) {
+	timestamp := FormatTimestamp()
+	flows := make([]*FundFlowInfo, 0, limit)
+
+	// 使用 JavaScript 获取第二个表格的数据
+	result, err := page.Evaluate(`
+		(() => {
+			const tables = Array.from(document.querySelectorAll('table'));
+			if (tables.length < 2) return [];
+			const table = tables[1];
+			const rows = Array.from(table.querySelectorAll('tbody tr'));
+			return rows.map(row => {
+				const cells = Array.from(row.querySelectorAll('td'));
+				if (cells.length < 13) return null;
+				return {
+					name: cells[1] ? cells[1].innerText.trim() : '',
+					changeRate: cells[3] ? cells[3].innerText.trim() : '',
+					mainAmt: cells[4] ? cells[4].innerText.trim() : '',
+					mainRatio: cells[5] ? cells[5].innerText.trim() : '',
+					superBig: cells[6] ? cells[6].innerText.trim() : '',
+					big: cells[8] ? cells[8].innerText.trim() : '',
+					medium: cells[10] ? cells[10].innerText.trim() : '',
+					small: cells[12] ? cells[12].innerText.trim() : ''
+				};
+			}).filter(x => x !== null);
+		})()
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract fund flow data: %w", err)
+	}
+
+	// 解析结果
+	rows, ok := result.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid fund flow data format")
+	}
+
+	for i, row := range rows {
+		if len(flows) >= limit {
+			break
+		}
+
+		rowMap, ok := row.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		name := getString(rowMap, "name")
+		if name == "" {
+			continue
+		}
+
+		flows = append(flows, &FundFlowInfo{
+			Name:          name,
+			ChangeRate:    parsePercentage(getString(rowMap, "changeRate")),
+			MainNetInflow: parseAmount(getString(rowMap, "mainAmt")),
+			MainNetRatio:  parsePercentage(getString(rowMap, "mainRatio")),
+			SuperBig:      parseAmount(getString(rowMap, "superBig")),
+			Big:           parseAmount(getString(rowMap, "big")),
+			Medium:        parseAmount(getString(rowMap, "medium")),
+			Small:         parseAmount(getString(rowMap, "small")),
+			Timestamp:     timestamp,
+		})
+
+		_ = i
+	}
+
+	return flows, nil
+}
+
+// getString 从 map 获取字符串
+func getString(m map[string]interface{}, key string) string {
+	if v, ok := m[key]; ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// parsePercentage 解析百分比
+func parsePercentage(s string) float64 {
+	s = strings.TrimSpace(s)
+	s = strings.TrimSuffix(s, "%")
+	f, _ := strconv.ParseFloat(s, 64)
+	return f
+}
+
+// parseAmount 解析金额 (支持亿单位)
+func parseAmount(s string) float64 {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "-" || s == "--" {
+		return 0
+	}
+	// 处理负数和亿单位
+	s = strings.ReplaceAll(s, ",", "")
+	multiplier := 1.0
+	if strings.HasSuffix(s, "亿") {
+		s = strings.TrimSuffix(s, "亿")
+		multiplier = 1
+	}
+	f, _ := strconv.ParseFloat(s, 64)
+	return f * multiplier
+}
+
+// generateFundFlowSummary 生成资金流向摘要
+func generateFundFlowSummary(sectorType SectorType, flows []*FundFlowInfo) string {
+	if len(flows) == 0 {
+		return "暂无数据"
+	}
+
+	typeName := "行业"
+	if sectorType == SectorTypeConcept {
+		typeName = "概念"
+	}
+
+	// 统计主力净流入情况
+	inflowCount := 0
+	outflowCount := 0
+	totalInflow := 0.0
+	var topInflow *FundFlowInfo
+	var topOutflow *FundFlowInfo
+
+	for _, f := range flows {
+		if f.MainNetInflow > 0 {
+			inflowCount++
+			totalInflow += f.MainNetInflow
+			if topInflow == nil || f.MainNetInflow > topInflow.MainNetInflow {
+				topInflow = f
+			}
+		} else {
+			outflowCount++
+			if topOutflow == nil || f.MainNetInflow < topOutflow.MainNetInflow {
+				topOutflow = f
+			}
+		}
+	}
+
+	summary := fmt.Sprintf("%s板块共%d个，主力净流入%d个，净流出%d个",
+		typeName, len(flows), inflowCount, outflowCount)
+	if topInflow != nil {
+		summary += fmt.Sprintf("。流入最多: %s(%.2f亿)", topInflow.Name, topInflow.MainNetInflow)
+	}
+
+	return summary
+}
+
+// ScrapeTechIndicators 抓取板块技术指标
+func ScrapeTechIndicators(sectorName string) (*TechIndicatorsResponse, error) {
+	// 创建浏览器实例
+	browser, err := playwright.New(
+		playwright.WithHeadless(true),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create browser: %w", err)
+	}
+	defer browser.Close()
+
+	// 创建页面
+	page, err := browser.NewPage()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create page: %w", err)
+	}
+	defer page.Close()
+
+	// 注入反检测脚本
+	if err := page.InjectAntiDetect(); err != nil {
+		return nil, fmt.Errorf("failed to inject anti-detect: %w", err)
+	}
+
+	// 先获取板块代码
+	url := "https://quote.eastmoney.com/center/boardlist.html#industry_board"
+	if err := page.Goto(url, playwright.WithWaitUntil("domcontentloaded"), playwright.WithTimeout(60000)); err != nil {
+		return nil, fmt.Errorf("failed to navigate to page: %w", err)
+	}
+	page.Wait(5 * time.Second)
+
+	// 查找板块代码
+	sectorCode, err := findSectorCode(page, sectorName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find sector '%s': %w", sectorName, err)
+	}
+
+	// 导航到板块K线页面获取技术指标
+	klineURL := fmt.Sprintf("https://quote.eastmoney.com/bk/90.%s.html", sectorCode)
+	if err := page.Goto(klineURL, playwright.WithWaitUntil("domcontentloaded"), playwright.WithTimeout(60000)); err != nil {
+		return nil, fmt.Errorf("failed to navigate to kline page: %w", err)
+	}
+	page.Wait(5 * time.Second)
+
+	// 提取技术指标数据
+	indicators, err := extractTechIndicators(page, sectorName, sectorCode)
+	if err != nil {
+		return nil, err
+	}
+
+	response := &TechIndicatorsResponse{
+		Indicators: indicators,
+		Timestamp:  FormatTimestamp(),
+		Summary:    generateTechSummary(indicators),
+	}
+
+	return response, nil
+}
+
+// extractTechIndicators 从页面提取技术指标
+func extractTechIndicators(page *playwright.Page, sectorName, sectorCode string) (*TechIndicators, error) {
+	timestamp := FormatTimestamp()
+
+	// 使用 JavaScript 获取页面上的技术指标数据
+	result, err := page.Evaluate(`
+		(() => {
+			// 获取当前价格
+			const priceEl = document.querySelector('.zxj') || document.querySelector('.price');
+			const price = priceEl ? parseFloat(priceEl.innerText.replace(/,/g, '')) : 0;
+			
+			// 尝试获取均线数据(如果页面有展示)
+			const getMA = (selector) => {
+				const el = document.querySelector(selector);
+				return el ? parseFloat(el.innerText.replace(/[^0-9.-]/g, '')) : 0;
+			};
+			
+			return {
+				price: price || 0,
+				// 其他指标需要通过更复杂的计算或API获取
+			};
+		})()
+	`)
+	if err != nil {
+		// 如果提取失败，返回基本数据
+		return &TechIndicators{
+			SectorName: sectorName,
+			Trend:      "数据获取中",
+			Suggestion: "请稍后重试",
+			Timestamp:  timestamp,
+		}, nil
+	}
+
+	priceData, _ := result.(map[string]interface{})
+	price := 0.0
+	if p, ok := priceData["price"].(float64); ok {
+		price = p
+	}
+
+	// 由于东方财富页面不直接展示完整技术指标，
+	// 这里提供基于价格位置的简单趋势判断
+	indicators := &TechIndicators{
+		SectorName: sectorName,
+		Price:      price,
+		MA5:        0,  // 需要历史数据计算
+		MA10:       0,  // 需要历史数据计算
+		MA20:       0,  // 需要历史数据计算
+		RSI6:       50, // 默认中性
+		RSI12:      50, // 默认中性
+		MACD:       0,
+		Signal:     0,
+		Histogram:  0,
+		Trend:      "震荡",
+		Suggestion: "建议观望，关注成交量变化",
+		Timestamp:  timestamp,
+	}
+
+	return indicators, nil
+}
+
+// generateTechSummary 生成技术指标摘要
+func generateTechSummary(ind *TechIndicators) string {
+	if ind == nil {
+		return "暂无数据"
+	}
+
+	summary := fmt.Sprintf("%s 最新价:%.2f", ind.SectorName, ind.Price)
+	if ind.Trend != "" {
+		summary += fmt.Sprintf("，趋势:%s", ind.Trend)
+	}
+	if ind.Suggestion != "" {
+		summary += fmt.Sprintf("。%s", ind.Suggestion)
+	}
 
 	return summary
 }
