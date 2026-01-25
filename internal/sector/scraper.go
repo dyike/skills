@@ -1,7 +1,10 @@
 package sector
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -787,7 +790,7 @@ func generateFundFlowSummary(sectorType SectorType, flows []*FundFlowInfo) strin
 
 // ScrapeTechIndicators 抓取板块技术指标
 func ScrapeTechIndicators(sectorName string) (*TechIndicatorsResponse, error) {
-	// 创建浏览器实例
+	// 创建浏览器实例获取板块代码
 	browser, err := playwright.New(
 		playwright.WithHeadless(true),
 	)
@@ -796,43 +799,36 @@ func ScrapeTechIndicators(sectorName string) (*TechIndicatorsResponse, error) {
 	}
 	defer browser.Close()
 
-	// 创建页面
 	page, err := browser.NewPage()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create page: %w", err)
 	}
 	defer page.Close()
 
-	// 注入反检测脚本
 	if err := page.InjectAntiDetect(); err != nil {
 		return nil, fmt.Errorf("failed to inject anti-detect: %w", err)
 	}
 
-	// 先获取板块代码
+	// 获取板块代码
 	url := "https://quote.eastmoney.com/center/boardlist.html#industry_board"
 	if err := page.Goto(url, playwright.WithWaitUntil("domcontentloaded"), playwright.WithTimeout(60000)); err != nil {
 		return nil, fmt.Errorf("failed to navigate to page: %w", err)
 	}
 	page.Wait(5 * time.Second)
 
-	// 查找板块代码
 	sectorCode, err := findSectorCode(page, sectorName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find sector '%s': %w", sectorName, err)
 	}
 
-	// 导航到板块K线页面获取技术指标
-	klineURL := fmt.Sprintf("https://quote.eastmoney.com/bk/90.%s.html", sectorCode)
-	if err := page.Goto(klineURL, playwright.WithWaitUntil("domcontentloaded"), playwright.WithTimeout(60000)); err != nil {
-		return nil, fmt.Errorf("failed to navigate to kline page: %w", err)
-	}
-	page.Wait(5 * time.Second)
-
-	// 提取技术指标数据
-	indicators, err := extractTechIndicators(page, sectorName, sectorCode)
+	// 使用K线API获取历史数据
+	klineData, err := fetchKlineData(sectorCode, 30)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to fetch kline data: %w", err)
 	}
+
+	// 计算技术指标
+	indicators := calculateTechIndicators(sectorName, klineData)
 
 	response := &TechIndicatorsResponse{
 		Indicators: indicators,
@@ -843,64 +839,236 @@ func ScrapeTechIndicators(sectorName string) (*TechIndicatorsResponse, error) {
 	return response, nil
 }
 
-// extractTechIndicators 从页面提取技术指标
-func extractTechIndicators(page *playwright.Page, sectorName, sectorCode string) (*TechIndicators, error) {
+// KlinePoint K线数据点
+type KlinePoint struct {
+	Date   string
+	Open   float64
+	Close  float64
+	High   float64
+	Low    float64
+	Volume int64
+	Amount float64
+	Change float64
+}
+
+// fetchKlineData 从东方财富API获取K线数据
+func fetchKlineData(sectorCode string, days int) ([]*KlinePoint, error) {
+	apiURL := fmt.Sprintf(
+		"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=90.%s&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&klt=101&fqt=1&end=20500101&lmt=%d",
+		sectorCode, days)
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// 解析JSON
+	var result struct {
+		Data struct {
+			Klines []string `json:"klines"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+
+	// 解析K线数据
+	// 格式: 日期,开盘,收盘,最高,最低,成交量,成交额,振幅,涨跌幅,涨跌额,换手率
+	klines := make([]*KlinePoint, 0, len(result.Data.Klines))
+	for _, line := range result.Data.Klines {
+		parts := strings.Split(line, ",")
+		if len(parts) < 10 {
+			continue
+		}
+		kp := &KlinePoint{
+			Date:   parts[0],
+			Open:   parseFloat(parts[1]),
+			Close:  parseFloat(parts[2]),
+			High:   parseFloat(parts[3]),
+			Low:    parseFloat(parts[4]),
+			Volume: parseInt(parts[5]),
+			Amount: parseFloat(parts[6]),
+			Change: parseFloat(parts[8]),
+		}
+		klines = append(klines, kp)
+	}
+
+	return klines, nil
+}
+
+// calculateTechIndicators 计算技术指标
+func calculateTechIndicators(sectorName string, klines []*KlinePoint) *TechIndicators {
 	timestamp := FormatTimestamp()
 
-	// 使用 JavaScript 获取页面上的技术指标数据
-	result, err := page.Evaluate(`
-		(() => {
-			// 获取当前价格
-			const priceEl = document.querySelector('.zxj') || document.querySelector('.price');
-			const price = priceEl ? parseFloat(priceEl.innerText.replace(/,/g, '')) : 0;
-			
-			// 尝试获取均线数据(如果页面有展示)
-			const getMA = (selector) => {
-				const el = document.querySelector(selector);
-				return el ? parseFloat(el.innerText.replace(/[^0-9.-]/g, '')) : 0;
-			};
-			
-			return {
-				price: price || 0,
-				// 其他指标需要通过更复杂的计算或API获取
-			};
-		})()
-	`)
-	if err != nil {
-		// 如果提取失败，返回基本数据
+	if len(klines) == 0 {
 		return &TechIndicators{
 			SectorName: sectorName,
-			Trend:      "数据获取中",
-			Suggestion: "请稍后重试",
+			Trend:      "数据不足",
+			Suggestion: "无法计算技术指标",
 			Timestamp:  timestamp,
-		}, nil
+		}
 	}
 
-	priceData, _ := result.(map[string]interface{})
-	price := 0.0
-	if p, ok := priceData["price"].(float64); ok {
-		price = p
+	// 获取收盘价数组
+	closes := make([]float64, len(klines))
+	for i, k := range klines {
+		closes[i] = k.Close
 	}
 
-	// 由于东方财富页面不直接展示完整技术指标，
-	// 这里提供基于价格位置的简单趋势判断
-	indicators := &TechIndicators{
+	// 当前价格
+	price := closes[len(closes)-1]
+
+	// 计算均线
+	ma5 := calculateMA(closes, 5)
+	ma10 := calculateMA(closes, 10)
+	ma20 := calculateMA(closes, 20)
+
+	// 计算RSI
+	rsi6 := calculateRSI(closes, 6)
+	rsi12 := calculateRSI(closes, 12)
+
+	// 计算MACD
+	macd, signal, histogram := calculateMACD(closes)
+
+	// 趋势判断
+	trend, suggestion := analyzeTrend(price, ma5, ma10, ma20, rsi6, macd, histogram)
+
+	return &TechIndicators{
 		SectorName: sectorName,
 		Price:      price,
-		MA5:        0,  // 需要历史数据计算
-		MA10:       0,  // 需要历史数据计算
-		MA20:       0,  // 需要历史数据计算
-		RSI6:       50, // 默认中性
-		RSI12:      50, // 默认中性
-		MACD:       0,
-		Signal:     0,
-		Histogram:  0,
-		Trend:      "震荡",
-		Suggestion: "建议观望，关注成交量变化",
+		MA5:        ma5,
+		MA10:       ma10,
+		MA20:       ma20,
+		RSI6:       rsi6,
+		RSI12:      rsi12,
+		MACD:       macd,
+		Signal:     signal,
+		Histogram:  histogram,
+		Trend:      trend,
+		Suggestion: suggestion,
 		Timestamp:  timestamp,
 	}
+}
 
-	return indicators, nil
+// calculateMA 计算移动平均线
+func calculateMA(data []float64, period int) float64 {
+	if len(data) < period {
+		return 0
+	}
+	sum := 0.0
+	for i := len(data) - period; i < len(data); i++ {
+		sum += data[i]
+	}
+	return sum / float64(period)
+}
+
+// calculateRSI 计算相对强弱指标
+func calculateRSI(data []float64, period int) float64 {
+	if len(data) < period+1 {
+		return 50
+	}
+
+	gains := 0.0
+	losses := 0.0
+
+	for i := len(data) - period; i < len(data); i++ {
+		change := data[i] - data[i-1]
+		if change > 0 {
+			gains += change
+		} else {
+			losses += -change
+		}
+	}
+
+	if losses == 0 {
+		return 100
+	}
+	rs := gains / losses
+	return 100 - (100 / (1 + rs))
+}
+
+// calculateMACD 计算MACD指标
+func calculateMACD(data []float64) (macd, signal, histogram float64) {
+	if len(data) < 26 {
+		return 0, 0, 0
+	}
+
+	// EMA12
+	ema12 := calculateEMA(data, 12)
+	// EMA26
+	ema26 := calculateEMA(data, 26)
+	// MACD = EMA12 - EMA26
+	macd = ema12 - ema26
+
+	// 简化的signal计算
+	signal = macd * 0.9
+	histogram = macd - signal
+
+	return macd, signal, histogram
+}
+
+// calculateEMA 计算指数移动平均
+func calculateEMA(data []float64, period int) float64 {
+	if len(data) < period {
+		return 0
+	}
+
+	multiplier := 2.0 / float64(period+1)
+	ema := data[len(data)-period] // 起始值
+
+	for i := len(data) - period + 1; i < len(data); i++ {
+		ema = (data[i]-ema)*multiplier + ema
+	}
+
+	return ema
+}
+
+// analyzeTrend 分析趋势并给出建议
+func analyzeTrend(price, ma5, ma10, ma20, rsi, macd, histogram float64) (trend, suggestion string) {
+	// 多头排列判断
+	bullishMA := ma5 > ma10 && ma10 > ma20 && price > ma5
+	// 空头排列判断
+	bearishMA := ma5 < ma10 && ma10 < ma20 && price < ma5
+
+	// RSI判断
+	overbought := rsi > 70
+	oversold := rsi < 30
+
+	// MACD判断
+	macdBullish := histogram > 0
+
+	if bullishMA && macdBullish {
+		trend = "强势上涨"
+		if overbought {
+			suggestion = "短期超买，注意高位风险，可适当减仓"
+		} else {
+			suggestion = "多头趋势明确，可继续持有或逢低买入"
+		}
+	} else if bearishMA && !macdBullish {
+		trend = "弱势下跌"
+		if oversold {
+			suggestion = "短期超卖，可能反弹，但不建议抄底"
+		} else {
+			suggestion = "空头趋势明确，建议观望或减仓"
+		}
+	} else if price > ma5 && price > ma10 {
+		trend = "震荡偏强"
+		suggestion = "短期偏强，关注突破情况"
+	} else if price < ma5 && price < ma10 {
+		trend = "震荡偏弱"
+		suggestion = "短期偏弱，等待企稳信号"
+	} else {
+		trend = "横盘震荡"
+		suggestion = "方向不明，建议等待趋势明确后再操作"
+	}
+
+	return trend, suggestion
 }
 
 // generateTechSummary 生成技术指标摘要
@@ -910,6 +1078,9 @@ func generateTechSummary(ind *TechIndicators) string {
 	}
 
 	summary := fmt.Sprintf("%s 最新价:%.2f", ind.SectorName, ind.Price)
+	if ind.MA5 > 0 {
+		summary += fmt.Sprintf("，MA5:%.2f，MA10:%.2f，MA20:%.2f", ind.MA5, ind.MA10, ind.MA20)
+	}
 	if ind.Trend != "" {
 		summary += fmt.Sprintf("，趋势:%s", ind.Trend)
 	}
