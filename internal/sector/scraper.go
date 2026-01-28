@@ -14,11 +14,18 @@ import (
 	pwgo "github.com/playwright-community/playwright-go"
 )
 
-// ScrapeSectors 抓取板块列表
+// ScrapeSectors 抓取板块列表 (使用Playwright)
 func ScrapeSectors(sectorType SectorType, limit int) (*SectorListResponse, error) {
 	url, ok := SectorURLs[sectorType]
 	if !ok {
 		return nil, fmt.Errorf("unsupported sector type: %s", sectorType)
+	}
+
+	// 移除 URL 中的 hash 部分，先访问基础页面
+	baseURL := strings.Split(url, "#")[0]
+	targetHash := ""
+	if strings.Contains(url, "#") {
+		targetHash = "#" + strings.Split(url, "#")[1]
 	}
 
 	// 创建浏览器实例
@@ -42,16 +49,54 @@ func ScrapeSectors(sectorType SectorType, limit int) (*SectorListResponse, error
 		return nil, fmt.Errorf("failed to inject anti-detect: %w", err)
 	}
 
-	// 导航到页面 (使用 domcontentloaded 代替 networkidle，更快响应)
-	if err := page.Goto(url, playwright.WithWaitUntil("domcontentloaded"), playwright.WithTimeout(60000)); err != nil {
+	// 导航到基础页面
+	if err := page.Goto(baseURL, playwright.WithWaitUntil("domcontentloaded"), playwright.WithTimeout(30000)); err != nil {
 		return nil, fmt.Errorf("failed to navigate to page: %w", err)
 	}
 
-	// 等待页面加载完成 (东方财富页面有大量 JS 渲染)
-	page.Wait(5 * time.Second)
+	// 等待一小段时间让页面初始化
+	page.Wait(2 * time.Second)
 
-	// 提取板块数据
-	sectors, err := extractSectorData(page, limit)
+	// 尝试关闭可能出现的弹窗
+	closePopups(page)
+
+	// 设置 hash 触发路由
+	if targetHash != "" {
+		page.Evaluate(fmt.Sprintf(`window.location.hash = '%s'`, targetHash))
+	}
+
+	// 等待数据表格加载完成（轮询检查）
+	// 最多等待 30 秒 (15 * 2s)
+	for i := 0; i < 15; i++ {
+		// 每次都尝试关闭弹窗
+		closePopups(page)
+
+		// 检查数据是否加载
+		result, _ := page.Evaluate(`
+			(() => {
+				const tables = document.querySelectorAll('table');
+				if (tables.length < 2) return { ready: false };
+				const rows = tables[1].querySelectorAll('tbody tr');
+				return { ready: rows.length > 5 };
+			})()
+		`)
+
+		if m, ok := result.(map[string]interface{}); ok {
+			if ready, ok := m["ready"].(bool); ok && ready {
+				break
+			}
+		}
+
+		// 假如设置hash没生效，再次尝试设置
+		if i%3 == 0 && targetHash != "" {
+			page.Evaluate(fmt.Sprintf(`window.location.hash = '%s'`, targetHash))
+		}
+
+		page.Wait(2 * time.Second)
+	}
+
+	// 提取板块数据 (使用第二个表格，第一个是沪深港通信息)
+	sectors, err := extractSectorDataFromSecondTable(page, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -70,6 +115,159 @@ func ScrapeSectors(sectorType SectorType, limit int) (*SectorListResponse, error
 	}
 
 	return response, nil
+}
+
+// closePopups 尝试关闭页面上的各种弹窗
+func closePopups(page *playwright.Page) {
+	page.Evaluate(`
+		(() => {
+			// 常见的弹窗关闭按钮选择器
+			const selectors = [
+				'.close', '.close-btn', '.closeBtn',
+				'[class*="close"]', '[class*="Close"]',
+				'.layui-layer-close', '.layui-layer-close1', '.layui-layer-close2',
+				'.modal-close', '.popup-close', '.dialog-close',
+				'.ad-close', '.adv-close', '#close', '.guide-close'
+			];
+			
+			for (const selector of selectors) {
+				try {
+					const elements = document.querySelectorAll(selector);
+					elements.forEach(el => {
+						if (el && el.offsetParent !== null) {
+							el.click();
+						}
+					});
+				} catch(e) {}
+			}
+			
+			// 移除可能的遮罩层和弹窗
+			const removables = document.querySelectorAll('.mask, .overlay, .modal-backdrop, .layui-layer-shade, .layui-layer, .popup, .modal');
+			removables.forEach(el => {
+				if (el && el.offsetParent !== null) {
+					el.remove();
+				}
+			});
+		})()
+	`)
+}
+
+// extractSectorDataFromSecondTable 从第二个表格提取板块数据
+// 东方财富板块列表页面有两个表格:
+// - 第一个表格: 沪深港通信息 (1行)
+// - 第二个表格: 板块列表数据
+// 表格结构 (2024年验证):
+//
+//	td[0]: 排名
+//	td[1]: 板块名称
+//	td[2]: 相关链接 (股吧/资金流/研报)
+//	td[3]: 最新价
+//	td[4]: 涨跌额
+//	td[5]: 涨跌幅
+//	td[6]: 总市值
+//	td[7]: 换手率
+//	td[8]: 上涨家数
+//	td[9]: 下跌家数
+//	td[10]: 领涨股票
+//	td[11]: 领涨股涨跌幅
+func extractSectorDataFromSecondTable(page *playwright.Page, limit int) ([]*SectorInfo, error) {
+	timestamp := FormatTimestamp()
+
+	// 使用 JavaScript 获取第二个表格的数据
+	result, err := page.Evaluate(fmt.Sprintf(`
+		(() => {
+			const tables = document.querySelectorAll('table');
+			if (tables.length < 2) return [];
+			
+			const table = tables[1]; // 使用第二个表格
+			const rows = Array.from(table.querySelectorAll('tbody tr'));
+			const limit = %d;
+			
+			return rows.slice(0, limit).map(row => {
+				const cells = Array.from(row.querySelectorAll('td'));
+				if (cells.length < 12) return null;
+				
+				return {
+					name: cells[1] ? cells[1].innerText.trim() : '',
+					price: cells[3] ? cells[3].innerText.trim() : '',
+					change: cells[4] ? cells[4].innerText.trim() : '',
+					changeRate: cells[5] ? cells[5].innerText.trim() : '',
+					marketCap: cells[6] ? cells[6].innerText.trim() : '',
+					turnover: cells[7] ? cells[7].innerText.trim() : '',
+					riseCount: cells[8] ? cells[8].innerText.trim() : '',
+					fallCount: cells[9] ? cells[9].innerText.trim() : '',
+					leaderStock: cells[10] ? cells[10].innerText.trim() : '',
+					leaderRate: cells[11] ? cells[11].innerText.trim() : ''
+				};
+			}).filter(x => x !== null && x.name !== '');
+		})()
+	`, limit))
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract sector data: %w", err)
+	}
+
+	// 解析结果
+	rows, ok := result.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid sector data format")
+	}
+
+	sectors := make([]*SectorInfo, 0, len(rows))
+	for _, row := range rows {
+		rowMap, ok := row.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		name := getString(rowMap, "name")
+		if name == "" {
+			continue
+		}
+
+		sectors = append(sectors, &SectorInfo{
+			Code:        "", // 页面不再显示板块代码
+			Name:        name,
+			Price:       parseFloat(getString(rowMap, "price")),
+			Change:      parseFloat(getString(rowMap, "change")),
+			ChangeRate:  parsePercentage(getString(rowMap, "changeRate")),
+			Volume:      0,                                              // 页面不再显示成交量
+			Amount:      parseMarketCap(getString(rowMap, "marketCap")), // 解析总市值为成交额
+			LeaderStock: getString(rowMap, "leaderStock"),
+			LeaderRate:  parsePercentage(getString(rowMap, "leaderRate")),
+			RiseCount:   int(parseInt(getString(rowMap, "riseCount"))),
+			FallCount:   int(parseInt(getString(rowMap, "fallCount"))),
+			Timestamp:   timestamp,
+		})
+	}
+
+	return sectors, nil
+}
+
+// getStringFromMap 从map中获取字符串值
+func getStringFromMap(m map[string]interface{}, key string) string {
+	if v, ok := m[key]; ok {
+		switch val := v.(type) {
+		case string:
+			return val
+		case float64:
+			return fmt.Sprintf("%v", val)
+		}
+	}
+	return ""
+}
+
+// getFloatFromMap 从map中获取浮点数值
+func getFloatFromMap(m map[string]interface{}, key string) float64 {
+	if v, ok := m[key]; ok {
+		switch val := v.(type) {
+		case float64:
+			return val
+		case string:
+			f, _ := strconv.ParseFloat(val, 64)
+			return f
+		}
+	}
+	return 0
 }
 
 // SortType 排序类型
