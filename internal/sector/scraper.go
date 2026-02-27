@@ -14,6 +14,14 @@ import (
 	pwgo "github.com/playwright-community/playwright-go"
 )
 
+// NewBrowser 创建 Playwright 浏览器实例
+func NewBrowser(headless bool) (*playwright.Browser, error) {
+	// 默认使用 Playwright 的 Chromium（无头模式）
+	return playwright.New(
+		playwright.WithHeadless(headless),
+	)
+}
+
 // ScrapeSectors 抓取板块列表 (使用Playwright)
 func ScrapeSectors(sectorType SectorType, limit int) (*SectorListResponse, error) {
 	url, ok := SectorURLs[sectorType]
@@ -617,11 +625,16 @@ func ScrapeSectorStocks(sectorName string, limit int) (*SectorStocksResponse, er
 
 // findSectorCode 从页面找到板块代码
 func findSectorCode(page *playwright.Page, sectorName string) (string, error) {
-	// 使用 JavaScript 查找板块链接并提取代码
+	// 使用 JavaScript 查找板块链接并提取代码（支持模糊匹配）
 	result, err := page.Evaluate(fmt.Sprintf(`
 		(() => {
 			const links = Array.from(document.querySelectorAll('a'));
-			const targetLink = links.find(l => l.innerText.trim() === '%s');
+			// 模糊匹配：查找包含关键词的链接
+			const targetLink = links.find(l => {
+				const text = l.innerText.trim();
+				// 支持模糊匹配，允许部分匹配
+				return text.includes('%s');
+			});
 			if (targetLink && targetLink.href) {
 				// 从 URL 提取板块代码，如 BK1031
 				const match = targetLink.href.match(/BK\d+/);
@@ -797,7 +810,45 @@ func ScrapeFundFlow(sectorType SectorType, limit int) (*FundFlowResponse, error)
 	if err := page.Goto(url, playwright.WithWaitUntil("domcontentloaded"), playwright.WithTimeout(60000)); err != nil {
 		return nil, fmt.Errorf("failed to navigate to page: %w", err)
 	}
-	page.Wait(5 * time.Second)
+
+	// 等待页面初始加载
+	page.Wait(2 * time.Second)
+
+	// 尝试关闭弹窗
+	closePopups(page)
+
+	// 轮询等待数据加载完成（最多 60 秒）
+	for i := 0; i < 30; i++ {
+		// 每次都尝试关闭弹窗
+		closePopups(page)
+
+		page.Wait(1500 * time.Millisecond)
+
+		// 检查数据是否加载 - 先检查是否有任何表格数据
+		result, _ := page.Evaluate(`
+			(() => {
+				const tables = document.querySelectorAll('table');
+				if (tables.length < 1) return { ready: false };
+				
+				for (let i = 0; i < tables.length; i++) {
+					const rows = tables[i].querySelectorAll('tbody tr, tr:not(thead *)');
+					// 检查是否有超过3行的数据
+					if (rows.length > 3) {
+						return { ready: true, tableIndex: i, rowCount: rows.length };
+					}
+				}
+				return { ready: false };
+			})()
+		`)
+
+		if m, ok := result.(map[string]interface{}); ok {
+			if ready, ok := m["ready"].(bool); ok && ready {
+				break
+			}
+		}
+
+		page.Wait(1500 * time.Millisecond)
+	}
 
 	// 提取资金流向数据
 	flows, err := extractFundFlowData(page, limit)
@@ -822,7 +873,7 @@ func ScrapeFundFlow(sectorType SectorType, limit int) (*FundFlowResponse, error)
 
 // extractFundFlowData 从页面提取资金流向数据
 // 东方财富资金流向页面结构:
-// table[1] tbody tr (第二个表格)
+// table tbody tr (动态查找包含资金流向数据的表格)
 //
 //	td[0]: 序号
 //	td[1]: 名称
@@ -843,13 +894,33 @@ func extractFundFlowData(page *playwright.Page, limit int) ([]*FundFlowInfo, err
 	timestamp := FormatTimestamp()
 	flows := make([]*FundFlowInfo, 0, limit)
 
-	// 使用 JavaScript 获取第二个表格的数据
+	// 使用 JavaScript 智能查找包含资金流向数据的表格
 	result, err := page.Evaluate(`
 		(() => {
 			const tables = Array.from(document.querySelectorAll('table'));
-			if (tables.length < 2) return [];
-			const table = tables[1];
-			const rows = Array.from(table.querySelectorAll('tbody tr'));
+			// 找到包含最多有效数据行的表格
+			let bestTable = null;
+			let maxRows = 0;
+			
+			for (const table of tables) {
+				const rows = Array.from(table.querySelectorAll('tbody tr'));
+				// 检查是否是资金流向数据表格（至少有10列）
+				if (rows.length > 0) {
+					const firstRowCells = rows[0].querySelectorAll('td');
+					if (firstRowCells.length >= 10 && rows.length > maxRows) {
+						// 额外验证：检查是否有百分比数据（资金流向特征）
+						const text = rows[0].innerText;
+						if (text.includes('%') || text.includes('亿')) {
+							maxRows = rows.length;
+							bestTable = table;
+						}
+					}
+				}
+			}
+			
+			if (!bestTable) return [];
+			
+			const rows = Array.from(bestTable.querySelectorAll('tbody tr'));
 			return rows.map(row => {
 				const cells = Array.from(row.querySelectorAll('td'));
 				if (cells.length < 13) return null;
@@ -863,7 +934,7 @@ func extractFundFlowData(page *playwright.Page, limit int) ([]*FundFlowInfo, err
 					medium: cells[10] ? cells[10].innerText.trim() : '',
 					small: cells[12] ? cells[12].innerText.trim() : ''
 				};
-			}).filter(x => x !== null);
+			}).filter(x => x !== null && x.name !== '');
 		})()
 	`)
 	if err != nil {
@@ -876,7 +947,7 @@ func extractFundFlowData(page *playwright.Page, limit int) ([]*FundFlowInfo, err
 		return nil, fmt.Errorf("invalid fund flow data format")
 	}
 
-	for i, row := range rows {
+	for _, row := range rows {
 		if len(flows) >= limit {
 			break
 		}
@@ -902,8 +973,6 @@ func extractFundFlowData(page *playwright.Page, limit int) ([]*FundFlowInfo, err
 			Small:         parseAmount(getString(rowMap, "small")),
 			Timestamp:     timestamp,
 		})
-
-		_ = i
 	}
 
 	return flows, nil
